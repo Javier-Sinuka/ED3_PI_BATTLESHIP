@@ -1,101 +1,129 @@
 #include "LPC17xx.h"
 #include "max_controll.h"
+#include "battleship_max.h"
 #include <stdint.h>
 
-/* ===================== SysTick config (tuyo) ===================== */
+/* ===================== SysTick config (TU VERSIÓN) ===================== */
 
 #define BIT_MASK(X)   (0x01u << (X))
-#define CORE          100000u   // según tu proyecto
-#define TICKS         1000u     // según tu proyecto
+#define CORE          100000u   // según tu definición
+#define TICKS         1000u
 #define ST_LOAD       ((TICKS * CORE) - 1u)
 
-void configSysTick(void) {
+static void configSysTick(void) {
     SysTick->LOAD = ST_LOAD;
-    SysTick->VAL  = 0;
-    SysTick->CTRL = 0x07;   // ENABLE + TICKINT + CLKSOURCE (core)
+    SysTick->VAL  = 0u;
+    SysTick->CTRL = 0x07u;   // ENABLE + TICKINT + CLKSOURCE (core)
+    // El SysTick_Handler real está en hw_time.c (BS_AnimationsUpdate + millis)
 }
 
-/* Contador de ticks de SysTick */
-static volatile uint32_t g_ticks = 0u;
+/* ===================== Botones de prueba (PORT2) ===================== */
 
-/* Handler de SysTick: se llama cada vez que se vence ST_LOAD */
-void SysTick_Handler(void) {
-    g_ticks++;
+#define BTN_PORT       2u
+#define BTN_LEFT_PIN   10u
+#define BTN_RIGHT_PIN  11u
+
+// Leer GPIO genérico (solo usamos puerto 2 acá)
+static uint8_t readGPIO(uint8_t port, uint8_t pin) {
+    if (port == 2u) {
+        return ( (LPC_GPIO2->FIOPIN & (1u << pin)) != 0u );
+    }
+    return 1u;  // por defecto "no presionado"
 }
 
-/* Delay en "ticks de SysTick" (no en ms) */
-static void delayTicks(uint32_t ticks) {
-    uint32_t start = g_ticks;
-    // Espera bloqueante hasta que pasen "ticks" interrupciones de SysTick
-    while ((uint32_t)(g_ticks - start) < ticks) {
-        // spin
+// Inicializar botones como entradas con pull-up interno
+static void TestButtons_Init(void) {
+    // P2.10 y P2.11 como entrada
+    LPC_GPIO2->FIODIR &= ~((1u << BTN_LEFT_PIN) | (1u << BTN_RIGHT_PIN));
+
+    // Pull-up interno en P2.10-11  (PINMODE4, bits 20-23)
+    // 00 = pull-up
+    LPC_PINCON->PINMODE4 &= ~((3u << 20) | (3u << 22));
+}
+
+// Poner el resto de los pines de PORT2 en salida (para que no floten)
+// OJO: si usás otros pines de P2 para otra cosa, ajustá la máscara.
+static void GPIO_InitUnusedPins_Port2(void) {
+    uint32_t mask_inputs = (1u << BTN_LEFT_PIN) | (1u << BTN_RIGHT_PIN);
+    // Todos 1 salvo 10 y 11 -> esos quedan como entrada
+    LPC_GPIO2->FIODIR |= ~mask_inputs;
+}
+
+/* ===================== Estado del bit en bloque 0 ===================== */
+
+// Bit en bloque 0 (BS_DEV_PIVOT), fila fija 3, columna 0..7
+static uint8_t test_row = 3u;
+static uint8_t test_col = 0u;
+static uint8_t pivot_rows[8];
+
+// Para detectar flancos de los botones (pull-up => reposo = 1)
+static uint8_t last_left  = 1u;
+static uint8_t last_right = 1u;
+
+// Actualiza el bit del bloque 0 según los botones
+static void Test_UpdatePivotFromButtons(void) {
+    uint8_t left_level  = readGPIO(BTN_PORT, BTN_LEFT_PIN);
+    uint8_t right_level = readGPIO(BTN_PORT, BTN_RIGHT_PIN);
+
+    // flanco de bajada = 1 -> 0 (botón presionado)
+    if (left_level == 0u && last_left == 1u) {
+        if (test_col > 0u) {
+            test_col--;
+        }
+    }
+    if (right_level == 0u && last_right == 1u) {
+        if (test_col < 7u) {
+            test_col++;
+        }
+    }
+
+    last_left  = left_level;
+    last_right = right_level;
+
+    // Actualizar display del bloque 0
+    {
+        int r;
+        for (r = 0; r < 8; r++) {
+            pivot_rows[r] = 0u;
+        }
+        pivot_rows[test_row] |= (uint8_t)(1u << test_col);
+        MAX_DrawRows(BS_DEV_PIVOT, pivot_rows);
     }
 }
 
-/* ===================== Tabla de dígitos (0–9) ===================== */
-
-static const uint8_t digits[10][8] = {
-    {0x3C,0x66,0x6E,0x76,0x66,0x66,0x66,0x3C}, //0
-    {0x18,0x38,0x78,0x18,0x18,0x18,0x18,0x7E}, //1
-    {0x3C,0x66,0x06,0x0C,0x18,0x60,0x66,0x7E}, //2
-    {0x3C,0x66,0x06,0x1C,0x06,0x06,0x66,0x3C}, //3
-    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x1E}, //4
-    {0x7E,0x60,0x7C,0x06,0x06,0x06,0x66,0x3C}, //5
-    {0x3C,0x66,0x60,0x7C,0x66,0x66,0x66,0x3C}, //6
-    {0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x18}, //7
-    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x66,0x3C}, //8
-    {0x3C,0x66,0x66,0x3E,0x06,0x06,0x66,0x3C}  //9
-};
-
-/* Dibuja un dígito en un MAX7219 (dev = 0..3) */
-static void drawDigitOnDevice(uint8_t dev, uint8_t num) {
-    uint8_t r;
-    if (num > 9u) return;
-
-    // Misma convención que en la librería: invertimos filas (0 abajo)
-    for (r = 0; r < 8u; r++) {
-        MAX_SetRow(dev, (uint8_t)(7u - r), digits[num][r]);
-    }
-}
-
-/* ============================ main ============================ */
+/* =============================== main =============================== */
 
 int main(void) {
-    uint8_t up0   = 0u;  // bloque 0: 0→9→0→...
-    uint8_t up2   = 0u;  // bloque 2: 0→9→0→...
-    uint8_t down1 = 9u;  // bloque 1: 9→0→9→...
-    uint8_t down3 = 9u;  // bloque 3: 9→0→9→...
+    int r;
 
-    SystemInit();
+    SystemInit();        // config básica de la LPC (PLL, etc.)
+    configSysTick();     // tu SysTick (el handler está en hw_time.c)
 
-    // Configurar SysTick con tu función
-    configSysTick();
-
-    // Inicializar SPI0 para MAX7219 (de tu librería)
+    // Inicializar SPI0 para el MAX7219
     MAX_SPI0_Init();
-    // Inicializar los 4 MAX7219 (intensidad, scan limit, etc.)
-    MAX_InitAll();
+
+    // Inicializar toda la lógica del juego (sin usarla todavía):
+    //  - MAX_InitAll()
+    //  - tablero oponente en bloque 2
+    //  - contador en bloque 3
+    //  - tablero jugador limpio, etc.
+    BS_GameInit();
+
+    // Inicializar botones de prueba y poner resto de P2 en salida
+    TestButtons_Init();
+    GPIO_InitUnusedPins_Port2();
+
+    // Estado inicial del bit en bloque 0
+    for (r = 0; r < 8; r++) {
+        pivot_rows[r] = 0u;
+    }
+    pivot_rows[test_row] |= (uint8_t)(1u << test_col);
+    MAX_DrawRows(BS_DEV_PIVOT, pivot_rows);
 
     while (1) {
-        // Bloque 0 (dev 0) y Bloque 2 (dev 2): contadores ascendentes
-        drawDigitOnDevice(BS_DEV_PIVOT,    up0);  // dev 0
-        drawDigitOnDevice(BS_DEV_OPPONENT, up2);  // dev 2
-
-        // Bloque 1 (dev 1) y Bloque 3 (dev 3): contadores descendentes
-        drawDigitOnDevice(BS_DEV_PLAYER,   down1); // dev 1
-        drawDigitOnDevice(BS_DEV_COUNTER,  down3); // dev 3
-
-        // Espera un tiempo visible (ajustá el valor según tus macros CORE/TICKS)
-        delayTicks(1u);  // 1 tick de SysTick; si es muy rápido/lento, ajustá a gusto
-
-        // Actualizar contadores
-        up0 = (uint8_t)((up0 + 1u) % 10u);
-        up2 = (uint8_t)((up2 + 1u) % 10u);
-
-        if (down1 == 0u) down1 = 9u;
-        else             down1--;
-
-        if (down3 == 0u) down3 = 9u;
-        else             down3--;
+        // Leer botones y actualizar el bit en el bloque 0
+        Test_UpdatePivotFromButtons();
+        // No hace falta delay: el parpadeo/animaciones del Battleship
+        // las maneja BS_AnimationsUpdate en el SysTick_Handler (hw_time.c).
     }
 }
