@@ -1,12 +1,11 @@
 #include "LPC17xx.h"
-#include "library_bs/battleship_max.h"
+#include "battleship_max.h"
 
-static volatile uint32_t g_msTicks = 0;
+static volatile uint32_t g_msTicks = 0U;
 static uint32_t lcg_state = 1234567u;
 
 void SysTick_Handler(void){
     g_msTicks++;
-    // Actualizar animaciones de Battleship (blink, etc.)
     BS_AnimationsUpdate(g_msTicks);
 }
 
