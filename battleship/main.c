@@ -25,67 +25,73 @@
 #define JOY_BTN_PORT    2u
 #define JOY_BTN_PIN     10u
 
-// ================= SysTick (contador bloque 3) =================
+// Botón extra para rotación de barco -> P2.11
+#define ROT_BTN_PORT    2u
+#define ROT_BTN_PIN     11u
+
+// ================= SysTick (base de tiempo para la librería) =================
 
 // Tus macros:
 #define CORE          100000u
 #define TICKS         1000u
 #define ST_LOAD       ((TICKS * CORE) - 1u)
 
-// Dígito actual del bloque 3 (counter)
-static volatile uint8_t g_counter_digit = 9u;
-
-// Tabla de dígitos (0–9) igual que en battleship_max
-static const uint8_t digits[10][8] = {
-    {0x3C,0x66,0x6E,0x76,0x66,0x66,0x66,0x3C}, //0
-    {0x18,0x38,0x78,0x18,0x18,0x18,0x18,0x7E}, //1
-    {0x3C,0x66,0x06,0x0C,0x18,0x60,0x66,0x7E}, //2
-    {0x3C,0x66,0x06,0x1C,0x06,0x06,0x66,0x3C}, //3
-    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x1E}, //4
-    {0x7E,0x60,0x7C,0x06,0x06,0x06,0x66,0x3C}, //5
-    {0x3C,0x66,0x60,0x7C,0x66,0x66,0x66,0x3C}, //6
-    {0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x18}, //7
-    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x66,0x3C}, //8
-    {0x3C,0x66,0x66,0x3E,0x06,0x06,0x66,0x3C}  //9
-};
-
-static void drawDigitBlock3(uint8_t num) {
-    uint8_t r;
-    if (num > 9u) return;
-
-    // Mismo criterio que la librería: fila lógica 0 abajo -> row 7
-    for (r = 0; r < 8u; r++) {
-        MAX_SetRow(BS_DEV_COUNTER, (uint8_t)(7u - r), digits[num][r]);
-    }
-}
-
+// Configuración de SysTick usando tu esquema
 static void configSysTick(void) {
     SysTick->LOAD = ST_LOAD;
     SysTick->VAL  = 0u;
     SysTick->CTRL = 0x07u;   // ENABLE + TICKINT + CLKSOURCE
+    // El SysTick_Handler está en otro archivo (por ejemplo hw_time.c),
+    // y ahí se llama a BS_AnimationsUpdate() y BS_Hal_GetMillis().
 }
 
-// SysTick: cuenta regresiva infinita en bloque 3
-void SysTick_Handler(void) {
-    if (g_counter_digit == 0u) {
-        g_counter_digit = 9u;
-    } else {
-        g_counter_digit--;
+// ================= Timer3: cuenta regresiva infinita en bloque 3 =================
+
+// Timer3 a ~1 Hz para llamar BS_CountdownStep()
+static void Timer3_Init_1Hz(void) {
+    TIM_TIMERCFG_Type cfgTimer3;
+    TIM_MATCHCFG_Type cfgMatch03;
+
+    // Timer base en us, prescale a 1000 -> tick = 1 ms
+    cfgTimer3.prescaleOption = TIM_USVAL;
+    cfgTimer3.prescaleValue  = 1000;
+    TIM_Init(LPC_TIM3, TIM_TIMER_MODE, &cfgTimer3);
+
+    // Match canal 0 (MR0) para 1 segundo aprox: 1000 ticks de 1 ms
+    cfgMatch03.matchChannel       = TIM_MATCH_0;
+    cfgMatch03.intOnMatch         = ENABLE;
+    cfgMatch03.stopOnMatch        = DISABLE;
+    cfgMatch03.resetOnMatch       = ENABLE;
+    cfgMatch03.extMatchOutputType = TIM_TOGGLE;  // no nos importa la salida
+    cfgMatch03.matchValue         = 999;         // 0..999 -> 1000 ms
+
+    TIM_ConfigMatch(LPC_TIM3, &cfgMatch03);
+    TIM_Cmd(LPC_TIM3, ENABLE);
+
+    NVIC_EnableIRQ(TIMER3_IRQn);
+}
+
+void TIMER3_IRQHandler(void) {
+    // Cada 1 s aproximado, avanzamos la cuenta regresiva del bloque 3
+    uint8_t finished = BS_CountdownStep();
+    if (finished) {
+        // Cuando llega a 0, lo reseteamos a 9 para que sea infinito
+        BS_CountdownSet(9u);
     }
-    drawDigitBlock3(g_counter_digit);
+    TIM_ClearIntPending(LPC_TIM3, TIM_MR0_INT);
 }
 
 // ================ Joystick / ADC ================
 
-// Lecturas del ADC
 static volatile uint32_t vrx = 0u;
 static volatile uint32_t vry = 0u;
 
-// "Tiempo falso" para BS_Placement_TryPlaceCurrentShip()
-static volatile uint32_t g_fakeTime = 0u;
+// Estado previo de los botones para detectar flancos
+static volatile uint8_t joyBtnLast = 1u;  // SW joystick
+static volatile uint8_t rotBtnLast = 1u;  // botón rotación
 
-// Estado previo del botón del joystick
-static volatile uint8_t joyBtnLast = 1u;  // 1 = no presionado (pull-up)
+// Flag: todos los barcos (2,4,6) ya colocados
+static volatile uint8_t g_allShipsPlaced = 0u;
 
 // Prototipos
 static void cfgGPIO(void);
@@ -98,21 +104,21 @@ static void GPIO_Port2_UnusedAsOutput(void);
 int main(void) {
     SystemInit();
 
-    // SysTick para el contador del bloque 3
+    // SysTick para base de tiempo de la librería (blink, etc.)
     configSysTick();
 
-    // Inicializar SPI0 + MAX + lógica Battleship
+    // Inicializar SPI0 + MAX + lógica completa Battleship
     MAX_SPI0_Init();
     BS_GameInit();
     // En este punto:
     //  - Bloque0: pivote/barco en preview
     //  - Bloque1: tablero jugador
     //  - Bloque2: contrincante con barcos 2,4,6
-    //  - Bloque3: algún valor inicial (lo vamos a sobrescribir)
+    //  - Bloque3: inicializado por la librería
 
-    // Forzamos arranque del contador en 9 en el bloque 3
-    g_counter_digit = 9u;
-    drawDigitBlock3(g_counter_digit);
+    // Contador del bloque 3 arranca en 9 y se actualiza con Timer3
+    BS_CountdownSet(9u);
+    Timer3_Init_1Hz();
 
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
@@ -120,33 +126,42 @@ int main(void) {
     cfgADC();
 
     while (1) {
-        // Todo se maneja por interrupción:
-        //  - SysTick: contador en bloque 3
-        //  - ADC: joystick + botón + actualización de bloques 0,1,2
+        // Todo se maneja por interrupciones:
+        //  - SysTick_Handler (en hw_time.c) -> BS_AnimationsUpdate()
+        //  - TIMER3_IRQHandler -> BS_CountdownStep()
+        //  - ADC_IRQHandler -> joystick + botones
         __WFI();   // opcional: dormir hasta próxima IRQ
     }
 }
 
-// ================ GPIO (joystick button + limpieza PORT2) ================
+// ================ GPIO (joystick + rotación + limpieza PORT2) ================
 
 static void cfgGPIO(void) {
     PINSEL_CFG_Type cfgPin;
 
-    // Botón del joystick en P2.10 como GPIO entrada con pull-up
-    cfgPin.Portnum   = PINSEL_PORT_2;
-    cfgPin.Pinnum    = PINSEL_PIN_10;
-    cfgPin.Funcnum   = PINSEL_FUNC_0;      // GPIO
-    cfgPin.Pinmode   = PINSEL_PINMODE_PULLUP;
-    cfgPin.OpenDrain = PINSEL_PINMODE_NORMAL;
+    // --- Botón del joystick en P2.10 como GPIO entrada con pull-up ---
+    cfgPin.portNum   = PINSEL_PORT_2;
+    cfgPin.pinNum    = PINSEL_PIN_10;
+    cfgPin.funcNum   = PINSEL_FUNC_0;      // GPIO
+    cfgPin.pinMode   = PINSEL_PULLUP;
+    cfgPin.openDrain = PINSEL_OD_NORMAL;
     PINSEL_ConfigPin(&cfgPin);
 
-    // Dirección: entrada
-    GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0);
+    GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0); // 0 = input
+
+    // --- Botón de rotación en P2.11 como GPIO entrada con pull-up ---
+    cfgPin.pinNum    = PINSEL_PIN_11;
+    cfgPin.funcNum   = PINSEL_FUNC_0;
+    cfgPin.pinMode   = PINSEL_PULLUP;
+    cfgPin.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfgPin);
+
+    GPIO_SetDir(ROT_BTN_PORT, BIT(ROT_BTN_PIN), 0); // 0 = input
 }
 
 // Poner el resto de los pines de PORT2 como salida para que no floten
 static void GPIO_Port2_UnusedAsOutput(void) {
-    uint32_t mask_inputs = (1u << JOY_BTN_PIN); // solo P2.10 entrada
+    uint32_t mask_inputs = (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
     LPC_GPIO2->FIODIR |= ~mask_inputs;
 }
 
@@ -156,30 +171,30 @@ static void cfgTimerForADC(void) {
     TIM_TIMERCFG_Type cfgTimer;
     TIM_MATCHCFG_Type cfgMatch01;
 
-    // Timer base: prescale en us -> 1 tick = 1 us * 1000 = 1 ms
-    cfgTimer.PrescaleOption = TIM_USVAL;
-    cfgTimer.PrescaleValue  = 1000;
+    // Timer base: prescale en us -> 1 tick = 1000 us = 1 ms
+    cfgTimer.prescaleOption = TIM_USVAL;
+    cfgTimer.prescaleValue  = 1000;
     TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgTimer);
 
-    // Match canal 1 (MAT0.1) para disparar el ADC cada ~125 ms (ajustable)
-    cfgMatch01.MatchChannel = TIM_MATCH_1;
-    cfgMatch01.IntOnMatch   = DISABLE;
-    cfgMatch01.ResetOnMatch = ENABLE;
-    cfgMatch01.StopOnMatch  = DISABLE;
-    cfgMatch01.ExtMatchOutputType = TIM_EXTMATCH_TOGGLE;
-    cfgMatch01.MatchValue   = 124;     // ~125 ms (depende de tu clock real)
+    // Match canal 1 (MAT0.1) para disparar el ADC cada ~125 ms
+    cfgMatch01.matchChannel       = TIM_MATCH_1;
+    cfgMatch01.intOnMatch         = DISABLE;
+    cfgMatch01.resetOnMatch       = ENABLE;
+    cfgMatch01.stopOnMatch        = DISABLE;
+    cfgMatch01.extMatchOutputType = TIM_TOGGLE;
+    cfgMatch01.matchValue         = 124;   // 0..124 -> 125 ms aprox.
 
     TIM_ConfigMatch(LPC_TIM0, &cfgMatch01);
     TIM_Cmd(LPC_TIM0, ENABLE);
 }
 
-// ================ ADC: Joystick X/Y + botón =================
+// ================ ADC: joystick X/Y + botones =================
 
 static void cfgADC(void) {
     // Inicializar ADC a tu rate
     ADC_Init(ADC_RATE);
 
-    // Pines analógicos para CH0 y CH1
+    // Pines analógicos para CH0 (VRx) y CH1 (VRy)
     ADC_PinConfig(ADC_CHANNEL_0);
     ADC_PinConfig(ADC_CHANNEL_1);
 
@@ -200,24 +215,31 @@ static void cfgADC(void) {
 }
 
 void ADC_IRQHandler(void) {
-    // "tiempo" artificial para pasar a BS_Placement_TryPlaceCurrentShip()
-    g_fakeTime += 10u;
-
+    // 1) Lectura del joystick analógico (VRx / VRy)
     if (ADC_GlobalGetStatus(ADC_DATA_DONE)) {
-        // Secuencia CH0 -> CH1 alternando
         if (ADC_ChannelGetStatus(ADC_CHANNEL_0, ADC_DATA_DONE)) {
-
-            // Cambiar a CH1 para la próxima
+            // Cambiar a CH1 para la próxima conversión
             ADC_ChannelCmd(ADC_CHANNEL_0, DISABLE);
             ADC_ChannelCmd(ADC_CHANNEL_1, ENABLE);
 
             vrx = ADC_ChannelGetData(ADC_CHANNEL_0);
 
             // Movimiento horizontal con VRx
+            BS_Mode mode = BS_GetMode();
             if (vrx > UPPER_LIM) {
-                BS_Placement_MoveCursor(BS_DIR_RIGHT);
+                // derecha
+                if (mode == MODE_PLACE) {
+                    BS_Placement_MoveCursor(BS_DIR_RIGHT);
+                } else { // MODE_SHOT
+                    BS_Shot_MoveCursor(BS_DIR_RIGHT);
+                }
             } else if (vrx < LOWER_LIM) {
-                BS_Placement_MoveCursor(BS_DIR_LEFT);
+                // izquierda
+                if (mode == MODE_PLACE) {
+                    BS_Placement_MoveCursor(BS_DIR_LEFT);
+                } else {
+                    BS_Shot_MoveCursor(BS_DIR_LEFT);
+                }
             }
 
         } else if (ADC_ChannelGetStatus(ADC_CHANNEL_1, ADC_DATA_DONE)) {
@@ -228,26 +250,73 @@ void ADC_IRQHandler(void) {
             vry = ADC_ChannelGetData(ADC_CHANNEL_1);
 
             // Movimiento vertical con VRy
+            BS_Mode mode = BS_GetMode();
             if (vry > UPPER_LIM) {
-                BS_Placement_MoveCursor(BS_DIR_UP);
+                // arriba
+                if (mode == MODE_PLACE) {
+                    BS_Placement_MoveCursor(BS_DIR_UP);
+                } else {
+                    BS_Shot_MoveCursor(BS_DIR_UP);
+                }
             } else if (vry < LOWER_LIM) {
-                BS_Placement_MoveCursor(BS_DIR_DOWN);
+                // abajo
+                if (mode == MODE_PLACE) {
+                    BS_Placement_MoveCursor(BS_DIR_DOWN);
+                } else {
+                    BS_Shot_MoveCursor(BS_DIR_DOWN);
+                }
             }
         }
     }
 
-    // Lectura del botón del joystick (SW en P2.10)
+    // 2) Botón del joystick (SW en P2.10): colocar/confirmar/disparar
     {
-        uint8_t btnNow = (GPIO_ReadValue(JOY_BTN_PORT) & BIT(JOY_BTN_PIN)) ? 1u : 0u;
+        uint8_t joyNow = (GPIO_ReadValue(JOY_BTN_PORT) & BIT(JOY_BTN_PIN)) ? 1u : 0u;
 
-        // Flanco de bajada: 1 -> 0 (presiona)
-        if (btnNow == 0u && joyBtnLast == 1u) {
-            BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(g_fakeTime);
-            (void)res; // por ahora no usamos res, pero podrías chequear BS_PLACE_ALL_DONE
+        if (joyNow == 0u && joyBtnLast == 1u) { // flanco de bajada
+            BS_Mode mode = BS_GetMode();
+
+            if (mode == MODE_PLACE) {
+                if (!g_allShipsPlaced) {
+                    // Intentar colocar barco actual (2,4,6)
+                    BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
+                    if (res == BS_PLACE_ALL_DONE) {
+                        // Ya colocamos los 3 barcos
+                        g_allShipsPlaced = 1u;
+                    }
+                    // Si res == BS_PLACE_INVALID, la lib maneja el blink de error
+                } else {
+                    // Todos los barcos ya colocados, estamos aún en MODE_PLACE:
+                    // este mismo botón actúa como "confirmar" -> pasamos a modo disparo
+                    BS_EnterShotMode();
+                }
+            } else { // MODE_SHOT
+                // En modo disparo: este botón dispara al contrincante
+                SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
+                (void)sres;
+                // La librería se encarga de:
+                //  - HIT: mantener led encendido
+                //  - MISS: blink en el agua
+            }
         }
 
-        joyBtnLast = btnNow;
+        joyBtnLast = joyNow;
     }
 
-    // battleship_max se encarga de refrescar bloques 0,1,2 internamente
+    // 3) Botón de rotación (P2.11): solo durante colocación y antes de terminar
+    {
+        uint8_t rotNow = (GPIO_ReadValue(ROT_BTN_PORT) & BIT(ROT_BTN_PIN)) ? 1u : 0u;
+
+        if (rotNow == 0u && rotBtnLast == 1u) { // flanco de bajada
+            if (BS_GetMode() == MODE_PLACE && !g_allShipsPlaced) {
+                BS_Placement_RotateCursor();
+            }
+        }
+
+        rotBtnLast = rotNow;
+    }
+
+    // battleship_max se encarga internamente de:
+    //  - refrescar bloques 0,1,2 en cada acción
+    //  - blinks de error, barcos listos, agua, etc. vía BS_AnimationsUpdate()
 }
