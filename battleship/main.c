@@ -35,7 +35,7 @@ static void cfgGPIO(void);
 static void cfgTimerForADC(void);
 static void cfgADC(void);
 
-// Blink sucio por software
+// Blink sucio por software (solo delay)
 static void BlinkErrorBusy(void);
 
 // ======================================================
@@ -48,7 +48,7 @@ int main(void)
 
     // Init MAX7219 + Battleship Logic
     MAX_SPI0_Init();
-    BS_GameInit();   // bloque0 pivote/barcos, bloque1 jugador, bloque2 contrincante, bloque3 contador (si lo usás en la lib)
+    BS_GameInit();   // bloque0 pivote/barcos, bloque1 jugador, bloque2 contrincante, etc.
 
     cfgGPIO();
     cfgTimerForADC();   // Timer0 con matchValue = 124
@@ -64,22 +64,16 @@ int main(void)
 }
 
 // ======================================================
-//  SOFTWARE BLINK (como Arduino, pero a nivel bloque)
-//  Parpadea el bloque del jugador cambiando la intensidad
+//  SOFTWARE BLINK (solo delay bloqueante)
 // ======================================================
-
 static void BlinkErrorBusy(void)
 {
-    // 4 parpadeos rápidos
+    // 4 "parpadeos" ficticios (solo tiempo, no modificamos el display)
     for (int i = 0; i < 4; i++)
     {
-        // muy tenue
-        MAX_SetIntensity(BS_DEV_PLAYER, 0);
-        for (volatile int d = 0; d < 90000; d++);
-
-        // intensidad media
-        MAX_SetIntensity(BS_DEV_PLAYER, 8);
-        for (volatile int d = 0; d < 90000; d++);
+        for (volatile int d = 0; d < 180000; d++) {
+            __NOP();
+        }
     }
 }
 
@@ -103,7 +97,7 @@ static void cfgGPIO(void)
 }
 
 // ======================================================
-//  TIMER0 – Trigger para ADC (match en 124, como pediste)
+//  TIMER0 – Trigger para ADC (match en 124)
 // ======================================================
 
 static void cfgTimerForADC(void)
@@ -120,7 +114,7 @@ static void cfgTimerForADC(void)
     m1.resetOnMatch       = ENABLE;
     m1.stopOnMatch        = DISABLE;
     m1.extMatchOutputType = TIM_TOGGLE;
-    m1.matchValue         = 124;     // valor original (no modificado)
+    m1.matchValue         = 124;     // valor original
 
     TIM_ConfigMatch(LPC_TIM0, &m1);
     TIM_Cmd(LPC_TIM0, ENABLE);
@@ -205,7 +199,7 @@ void ADC_IRQHandler(void)
         {
             BS_PlaceResult r = BS_Placement_TryPlaceCurrentShip(fakeTime);
 
-            // IMPORTANTE: acá usamos SOLO enums que sabemos que existen:
+            // Usamos solo enums que seguro existen:
             //  - BS_PLACE_INVALID
             //  - BS_PLACE_ALL_DONE
             if (r == BS_PLACE_INVALID)
@@ -215,7 +209,7 @@ void ADC_IRQHandler(void)
             }
             else if (r == BS_PLACE_ALL_DONE)
             {
-                // Opcional: indicar que se terminaron de colocar los 3 barcos
+                // Opcional: indicar que se terminaron de colocar los barcos
                 BlinkErrorBusy();
             }
         }
