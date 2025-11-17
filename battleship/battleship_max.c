@@ -1,3 +1,4 @@
+// battleship_max.c
 #include "battleship_max.h"
 
 // ========= Constantes internas =========
@@ -5,6 +6,10 @@ static const uint32_t BLINK_MS      = 180U;  // blink tablero jugador
 static const uint32_t OPP_BLINK_MS  = 300U;  // blink MISSES oponente
 static const uint32_t ERR_BLINK_MS  = 90U;   // periodo blink error
 static const uint8_t  ERR_BLINK_TOGGLES = 6U; // 3 ciclos on/off
+
+// 0U = modo juego real (NO se ven los barcos enemigos al inicio)
+// 1U = modo debug (se ven también los SHIP del oponente)
+#define BS_DEBUG_SHOW_ENEMY  0U
 
 // ========= Estado global =========
 
@@ -89,7 +94,20 @@ static void boardToRowsOpponent(const BATTLESHIP_STATUS_Type b[8][8],
         uint8_t v=0U;
         for(c=0;c<8;c++){
             BATTLESHIP_STATUS_Type st=b[r][c];
-            if(st==SHIP || st==HIT){
+
+            // En modo juego real:
+            //   - HIT  siempre visible (LED fijo)
+            //   - MISS visible solo cuando blinkOn=1 (blink agua)
+            //   - SHIP oculto (solo se ve cuando pasa a HIT)
+            //
+            // En modo debug (BS_DEBUG_SHOW_ENEMY=1):
+            //   - SHIP también se ve fijo desde el inicio.
+            if(
+                st==HIT
+#if BS_DEBUG_SHOW_ENEMY
+                || st==SHIP
+#endif
+              ){
                 v |= (uint8_t)(1u<<c);
             }else if(st==MISS && blinkOn){
                 v |= (uint8_t)(1u<<c);
@@ -157,6 +175,7 @@ static void genOpponentBoard(void){
     placeShipRandom(opponent_board, 4);
     placeShipRandom(opponent_board, 6);
     opponent_exists = 1U;
+    // Con BS_DEBUG_SHOW_ENEMY=0, esto dibuja todo apagado (no se ven SHIP).
     drawOpponentFrame(1U);
 }
 
@@ -525,7 +544,13 @@ uint8_t BS_Shot_MoveCursor(BS_Dir dir){
 SHOT_RESULT_t BS_Shot_FireAtCursor(void){
     SHOT_RESULT_t res;
     if(mode!=MODE_SHOT) return SHOT_NONE;
+
+    // Aplica disparo sobre tablero lógico del oponente:
+    //  - SHIP -> HIT  (queda LED fijo en drawOpponentFrame)
+    //  - WATER -> MISS (blink agua vía oppBlinkState)
     res = applyShotAtBoard(opponent_board, prow, pcol);
+
+    // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto "rápido")
     drawOpponentFrame(1U);
     return res;
 }

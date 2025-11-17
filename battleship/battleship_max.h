@@ -1,3 +1,4 @@
+// battleship_max.h
 #ifndef BATTLESHIP_MAX_H
 #define BATTLESHIP_MAX_H
 
@@ -48,12 +49,10 @@ typedef enum {
 } BS_PlaceResult;
 
 // ==== HAL mínima requerida ====
-
 uint32_t BS_Hal_GetMillis(void);
 uint32_t BS_Hal_GetRandom(void);
 
 // ==== API de inicialización ====
-
 void BS_GameInit(void);
 BS_Mode BS_GetMode(void);
 
@@ -107,4 +106,4 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void);
 // Devuelve 1 si todos los barcos del oponente fueron destruidos.
 uint8_t BS_Shot_OpponentAllDestroyed(void);
 
-#endif // BATTLESHIP_H
+#endif // BATTLESHIP_MAX_H
