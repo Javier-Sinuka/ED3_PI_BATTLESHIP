@@ -1,3 +1,4 @@
+// main.c
 #include "LPC17xx.h"
 #include "lpc17xx_gpio.h"
 #include "lpc17xx_timer.h"
@@ -14,10 +15,13 @@
 #define LOWER_LIM       0x1FFu
 
 // Joystick HW504
-#define JOY_BTN_PORT    2u   // P2.10 -> EINT0
+// VRx -> ADC_CHANNEL_0 (ej: P0.23 AD0.0)
+// VRy -> ADC_CHANNEL_1 (ej: P0.24 AD0.1)
+// SW  -> P2.10 -> EINT0
+#define JOY_BTN_PORT    2u
 #define JOY_BTN_PIN     10u
 
-// Botón rotación -> EINT1 en P2.11
+// Botón de rotación -> P2.11 -> EINT1
 #define ROT_BTN_PORT    2u
 #define ROT_BTN_PIN     11u
 
@@ -25,53 +29,40 @@ static volatile uint32_t vrx = 0u;
 static volatile uint32_t vry = 0u;
 static volatile uint8_t  g_allShipsPlaced = 0u;
 
-// ========== Delay “sucio” ==========
-static void delayMs_busy(uint32_t ms) {
-    volatile uint32_t i;
-    while (ms--) {
-        for (i = 0; i < 10000u; i++) {
-            __NOP();
-        }
-    }
-}
+// Declaración de tu función de SysTick (definida en otro archivo tuyo)
+extern void configSysTick(void);
 
-// Blink de error “sucio” (jugador) ─ intensidad del bloque 1
-static void BlinkErrorBusy(void) {
-    uint8_t i;
-    for (i = 0; i < 4u; i++) {
-        MAX_SetIntensity(BS_DEV_PLAYER, 0);   // casi apagado
-        delayMs_busy(80);
-        MAX_SetIntensity(BS_DEV_PLAYER, 8);   // intensidad media
-        delayMs_busy(80);
-    }
-}
-
-// ========= Prototipos =========
+// Prototipos
 static void cfgGPIO(void);
+static void GPIO_Port2_UnusedAsOutput(void);
 static void cfgEINT(void);
 static void cfgTimerForADC(void);
 static void cfgADC(void);
-static void GPIO_Port2_UnusedAsOutput(void);
+static void Timer3_Init_1Hz(void);
 
-// ================ main ================
+// ===================== main =====================
 int main(void) {
     SystemInit();
 
+    // Tu configuración de SysTick (usa CORE/TICKS/ST_LOAD)
+    configSysTick();   // SysTick_Handler está en hw_time.c
+
+    // MAX7219 + lógica Battleship
     MAX_SPI0_Init();
     BS_GameInit();
 
-    // si seguís usando el contador del bloque3:
+    // Contador del bloque 3: arranca en 9
     BS_CountdownSet(9u);
-    // Timer3_Init_1Hz();  // si lo querés dejar, mantenelo como antes
+    Timer3_Init_1Hz();   // si no lo querés, podrías comentarlo
 
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
     cfgEINT();
-    cfgTimerForADC();
+    cfgTimerForADC();    // Timer0, matchValue = 74
     cfgADC();
 
     while (1) {
-        __WFI();
+        __WFI();   // Espera a interrupciones (ADC, EINT, SysTick, Timer3)
     }
 }
 
@@ -94,7 +85,7 @@ static void cfgGPIO(void) {
     cfgPin.openDrain = PINSEL_OD_NORMAL;
     PINSEL_ConfigPin(&cfgPin);
 
-    // Opcional: igual los tratamos como entradas para GPIO también
+    // Opcional: dirección como entrada (por GPIO)
     GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0);
     GPIO_SetDir(ROT_BTN_PORT, BIT(ROT_BTN_PIN), 0);
 }
@@ -108,7 +99,6 @@ static void GPIO_Port2_UnusedAsOutput(void) {
 static void cfgEINT(void) {
     EXTI_Init();
 
-    // Config pin para EINT0 y EINT1 con pull-up interno
     EXTI_PinConfig(EXTI_EINT0, EXTI_PULLUP);
     EXTI_PinConfig(EXTI_EINT1, EXTI_PULLUP);
 
@@ -120,8 +110,8 @@ static void cfgEINT(void) {
     cfgEXTI.line = EXTI_EINT0;
     EXTI_Config(&cfgEXTI);
     EXTI_ClearEXTIFlag(EXTI_EINT0);
-    EXTI_Enable(EXTI_EINT0);      // habilita línea
-    NVIC_EnableIRQ(EINT0_IRQn);   // habilita IRQ en NVIC
+    EXTI_Enable(EXTI_EINT0);
+    NVIC_EnableIRQ(EINT0_IRQn);
 
     // EINT1: botón rotación
     cfgEXTI.line = EXTI_EINT1;
@@ -131,13 +121,13 @@ static void cfgEINT(void) {
     NVIC_EnableIRQ(EINT1_IRQn);
 }
 
-// ========== Timer0: trigger para ADC (con matchValue 74) ==========
+// ========== Timer0: trigger para ADC (matchValue = 74) ==========
 static void cfgTimerForADC(void) {
     TIM_TIMERCFG_Type cfgTimer;
     TIM_MATCHCFG_Type cfgMatch01;
 
     cfgTimer.prescaleOption = TIM_USVAL;
-    cfgTimer.prescaleValue  = 1000;     // 1 ms por tick
+    cfgTimer.prescaleValue  = 1000;     // 1 ms -> 1 tick
     TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgTimer);
 
     cfgMatch01.matchChannel       = TIM_MATCH_1;
@@ -145,15 +135,46 @@ static void cfgTimerForADC(void) {
     cfgMatch01.resetOnMatch       = ENABLE;
     cfgMatch01.stopOnMatch        = DISABLE;
     cfgMatch01.extMatchOutputType = TIM_TOGGLE;
-    cfgMatch01.matchValue         = 74;       // tu cambio: 75 ms aprox
+    cfgMatch01.matchValue         = 74;      // tu cambio: ~75 ms
 
     TIM_ConfigMatch(LPC_TIM0, &cfgMatch01);
     TIM_Cmd(LPC_TIM0, ENABLE);
 }
 
+// ========== Timer3: contador 9→0 en bloque3 ==========
+static void Timer3_Init_1Hz(void) {
+    TIM_TIMERCFG_Type cfgTimer3;
+    TIM_MATCHCFG_Type cfgMatch03;
+
+    cfgTimer3.prescaleOption = TIM_USVAL;
+    cfgTimer3.prescaleValue  = 1000;   // 1 ms por tick
+    TIM_Init(LPC_TIM3, TIM_TIMER_MODE, &cfgTimer3);
+
+    cfgMatch03.matchChannel       = TIM_MATCH_0;
+    cfgMatch03.intOnMatch         = ENABLE;
+    cfgMatch03.resetOnMatch       = ENABLE;
+    cfgMatch03.stopOnMatch        = DISABLE;
+    cfgMatch03.extMatchOutputType = TIM_NOTHING;
+    cfgMatch03.matchValue         = 999;   // 0..999 -> 1000 ms
+
+    TIM_ConfigMatch(LPC_TIM3, &cfgMatch03);
+    TIM_Cmd(LPC_TIM3, ENABLE);
+
+    NVIC_EnableIRQ(TIMER3_IRQn);
+}
+
+void TIMER3_IRQHandler(void) {
+    uint8_t finished = BS_CountdownStep();
+    if (finished) {
+        BS_CountdownSet(9u);
+    }
+    TIM_ClearIntPending(LPC_TIM3, TIM_MR0_INT);
+}
+
 // ========== ADC: joystick X/Y ==========
 static void cfgADC(void) {
     ADC_Init(ADC_RATE);
+
     ADC_PinConfig(ADC_CHANNEL_0);   // VRx
     ADC_PinConfig(ADC_CHANNEL_1);   // VRy
 
@@ -211,25 +232,18 @@ void EINT0_IRQHandler(void) {
 
     if (mode == MODE_PLACE) {
         if (!g_allShipsPlaced) {
-            BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(0); // ahora el tiempo no importa
-            if (res == BS_PLACE_INVALID) {
-                // Blink "sucio" al estilo Arduino
-                BlinkErrorBusy();
-            } else if (res == BS_PLACE_ALL_DONE) {
+            BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
+            if (res == BS_PLACE_ALL_DONE) {
                 g_allShipsPlaced = 1u;
-                // Podrías hacer otro blink distinto aquí si querés
             }
+            // Si res == BS_PLACE_INVALID, la librería se encarga de activar el blink
         } else {
-            // Ya coloqué todos los barcos y sigo en MODE_PLACE:
-            // este botón ahora actúa como "confirmar" -> entrar a modo disparo
+            // todos los barcos puestos y seguimos en MODE_PLACE -> confirmamos
             BS_EnterShotMode();
         }
     } else { // MODE_SHOT
-        SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
-        if (sres == SHOT_MISS) {
-            // Podés reusar BlinkErrorBusy o hacer otro patrón
-            BlinkErrorBusy();
-        }
+        (void)BS_Shot_FireAtCursor();
+        // La lib maneja HIT/MISS y animaciones mediante BS_AnimationsUpdate()
     }
 
     EXTI_ClearEXTIFlag(EXTI_EINT0);
