@@ -3,179 +3,136 @@
 #include "lpc17xx_timer.h"
 #include "lpc17xx_pinsel.h"
 #include "lpc17xx_adc.h"
-#include "lpc17xx_exti.h"
 
 #include "max_controll.h"
 #include "battleship_max.h"
 
-#define BIT(x)          (1u << (x))
-#define ADC_RATE        180000u
-#define UPPER_LIM       0xE00u
-#define LOWER_LIM       0x1FFu
+// ======================================================
+//  DEFINES
+// ======================================================
+#define BIT(x)            (1u << (x))
+
+#define ADC_RATE          180000u
+#define UPPER_LIM         0xE00u
+#define LOWER_LIM         0x1FFu
 
 // Joystick HW504
-// VRx -> ADC_CHANNEL_0 (ej: P0.23 AD0.0)
-// VRy -> ADC_CHANNEL_1 (ej: P0.24 AD0.1)
-// SW  -> P2.10 -> EINT0
-#define JOY_BTN_PORT    2u
-#define JOY_BTN_PIN     10u
+#define JOY_BTN_PORT      2u
+#define JOY_BTN_PIN       10u
 
-// Botón de rotación -> P2.11 -> EINT1
-#define ROT_BTN_PORT    2u
-#define ROT_BTN_PIN     11u
+static volatile uint32_t vrx = 0;
+static volatile uint32_t vry = 0;
+static volatile uint32_t fakeTime = 0;
+static volatile uint8_t joyBtnLast = 1;    // pull-up → 1 = no presionado
 
-static volatile uint32_t vrx = 0u;
-static volatile uint32_t vry = 0u;
-static volatile uint8_t  g_allShipsPlaced = 0u;
-
-// Tu función de SysTick ya definida en otro archivo
-extern void configSysTick(void);
-
-// Prototipos
+// ======================================================
+//  PROTOTIPOS
+// ======================================================
 static void cfgGPIO(void);
-static void GPIO_Port2_UnusedAsOutput(void);
-static void cfgEINT(void);
 static void cfgTimerForADC(void);
 static void cfgADC(void);
-static void Timer3_Init_1Hz(void);
 
-// ===================== main =====================
-int main(void) {
+// Blink sucio
+static void BlinkErrorBusy(void);
+
+// ======================================================
+//  MAIN
+// ======================================================
+
+int main(void)
+{
     SystemInit();
 
-    // SysTick como reloj de la librería
-    configSysTick();   // SysTick_Handler está en hw_time.c
-
-    // MAX7219 + lógica Battleship
+    // Init MAX7219 + Battleship Logic
     MAX_SPI0_Init();
-    BS_GameInit();
-
-    // Contador bloque 3: 9 → 0 en bucle
-    BS_CountdownSet(9u);
-    Timer3_Init_1Hz();
+    BS_GameInit();   // bloque0 pivote, bloque1 tablero propio, bloque2 enemigo
 
     cfgGPIO();
-    GPIO_Port2_UnusedAsOutput();
-    cfgEINT();
-    cfgTimerForADC();    // Timer0, matchValue = 74
+    cfgTimerForADC();
     cfgADC();
 
-    while (1) {
-        __WFI();   // Espera interrupciones
+    while(1)
+    {
+        __WFI();   // Todo se maneja por IRQ
     }
+
+    return 0;
 }
 
-// ========== GPIO: EINT0 / EINT1 + limpieza PORT2 ==========
-static void cfgGPIO(void) {
-    PINSEL_CFG_Type cfgPin;
+// ======================================================
+//  SOFTWARE BLINK (como Arduino)
+// ======================================================
 
-    // P2.10 como EINT0 (función 1), con pull-up
-    cfgPin.portNum   = PINSEL_PORT_2;
-    cfgPin.pinNum    = PINSEL_PIN_10;
-    cfgPin.funcNum   = PINSEL_FUNC_1;         // EINT0
-    cfgPin.pinMode   = PINSEL_PULLUP;
-    cfgPin.openDrain = PINSEL_OD_NORMAL;
-    PINSEL_ConfigPin(&cfgPin);
+static void BlinkErrorBusy(void)
+{
+    // Vamos a blinkear 4 veces como en el Arduino
+    for (int i = 0; i < 4; i++)
+    {
+        // Mostrar barco actual (bit conflictivo) encendido
+        BS_Placement_ShowCurrentPreview(1);
+        for (volatile int d = 0; d < 90000; d++);
 
-    // P2.11 como EINT1 (función 1), con pull-up
-    cfgPin.pinNum    = PINSEL_PIN_11;
-    cfgPin.funcNum   = PINSEL_FUNC_1;         // EINT1
-    cfgPin.pinMode   = PINSEL_PULLUP;
-    cfgPin.openDrain = PINSEL_OD_NORMAL;
-    PINSEL_ConfigPin(&cfgPin);
+        // Apagarlo
+        BS_Placement_ShowCurrentPreview(0);
+        for (volatile int d = 0; d < 90000; d++);
+    }
 
-    // También como entrada GPIO
+    // Dejarlo encendido nuevamente
+    BS_Placement_ShowCurrentPreview(1);
+}
+
+// ======================================================
+//  GPIO – Botón del Joystick
+// ======================================================
+
+static void cfgGPIO(void)
+{
+    PINSEL_CFG_Type cfg;
+
+    cfg.portNum   = PINSEL_PORT_2;
+    cfg.pinNum    = PINSEL_PIN_10;
+    cfg.funcNum   = PINSEL_FUNC_0;
+    cfg.pinMode   = PINSEL_PULLUP;
+    cfg.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfg);
+
     GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0);
-    GPIO_SetDir(ROT_BTN_PORT, BIT(ROT_BTN_PIN), 0);
 }
 
-static void GPIO_Port2_UnusedAsOutput(void) {
-    uint32_t mask_inputs = (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
-    LPC_GPIO2->FIODIR |= ~mask_inputs;
-}
+// ======================================================
+//  TIMER0 – Trigger para ADC (match en 124 como pediste)
+// ======================================================
 
-// ========== EXTI (EINT0 / EINT1) ==========
-static void cfgEINT(void) {
-    EXTI_Init();
+static void cfgTimerForADC(void)
+{
+    TIM_TIMERCFG_Type cfgT;
+    cfgT.prescaleOption = TIM_USVAL;
+    cfgT.prescaleValue  = 1000;     // 1 ms cada tick
 
-    EXTI_PinConfig(EXTI_EINT0, EXTI_PULLUP);
-    EXTI_PinConfig(EXTI_EINT1, EXTI_PULLUP);
+    TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgT);
 
-    EXTI_CFG_Type cfgEXTI;
-    cfgEXTI.mode     = EXTI_EDGE_SENSITIVE;
-    cfgEXTI.polarity = EXTI_FALLING_EDGE;
+    TIM_MATCHCFG_Type m1;
+    m1.matchChannel       = TIM_MATCH_1;
+    m1.intOnMatch         = DISABLE;
+    m1.resetOnMatch       = ENABLE;
+    m1.stopOnMatch        = DISABLE;
+    m1.extMatchOutputType = TIM_TOGGLE;
+    m1.matchValue         = 124;     // valor original
 
-    // EINT0: joystick SW -> colocar / confirmar / disparar
-    cfgEXTI.line = EXTI_EINT0;
-    EXTI_Config(&cfgEXTI);
-    EXTI_ClearFlag(EXTI_EINT0);
-    EXTI_EnableIRQ(EXTI_EINT0);       // <--- API correcta
-    NVIC_EnableIRQ(EINT0_IRQn);
-
-    // EINT1: botón rotación
-    cfgEXTI.line = EXTI_EINT1;
-    EXTI_Config(&cfgEXTI);
-    EXTI_ClearFlag(EXTI_EINT1);
-    EXTI_EnableIRQ(EXTI_EINT1);       // <--- API correcta
-    NVIC_EnableIRQ(EINT1_IRQn);
-}
-
-// ========== Timer0: trigger para ADC (matchValue = 74) ==========
-static void cfgTimerForADC(void) {
-    TIM_TIMERCFG_Type cfgTimer;
-    TIM_MATCHCFG_Type cfgMatch01;
-
-    cfgTimer.prescaleOption = TIM_USVAL;
-    cfgTimer.prescaleValue  = 1000;     // 1 ms
-    TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgTimer);
-
-    cfgMatch01.matchChannel       = TIM_MATCH_1;
-    cfgMatch01.intOnMatch         = DISABLE;
-    cfgMatch01.resetOnMatch       = ENABLE;
-    cfgMatch01.stopOnMatch        = DISABLE;
-    cfgMatch01.extMatchOutputType = TIM_TOGGLE;
-    cfgMatch01.matchValue         = 74;      // ~75 ms
-
-    TIM_ConfigMatch(LPC_TIM0, &cfgMatch01);
+    TIM_ConfigMatch(LPC_TIM0, &m1);
     TIM_Cmd(LPC_TIM0, ENABLE);
 }
 
-// ========== Timer3: contador 9→0 en bloque3 ==========
-static void Timer3_Init_1Hz(void) {
-    TIM_TIMERCFG_Type cfgTimer3;
-    TIM_MATCHCFG_Type cfgMatch03;
+// ======================================================
+//  ADC – Joystick X/Y + botón
+// ======================================================
 
-    cfgTimer3.prescaleOption = TIM_USVAL;
-    cfgTimer3.prescaleValue  = 1000;   // 1 ms por tick
-    TIM_Init(LPC_TIM3, TIM_TIMER_MODE, &cfgTimer3);
-
-    cfgMatch03.matchChannel       = TIM_MATCH_0;
-    cfgMatch03.intOnMatch         = ENABLE;
-    cfgMatch03.resetOnMatch       = ENABLE;
-    cfgMatch03.stopOnMatch        = DISABLE;
-    cfgMatch03.extMatchOutputType = TIM_NOTHING;
-    cfgMatch03.matchValue         = 999;   // 0..999 -> 1000 ms
-
-    TIM_ConfigMatch(LPC_TIM3, &cfgMatch03);
-    TIM_Cmd(LPC_TIM3, ENABLE);
-
-    NVIC_EnableIRQ(TIMER3_IRQn);
-}
-
-void TIMER3_IRQHandler(void) {
-    uint8_t finished = BS_CountdownStep();
-    if (finished) {
-        BS_CountdownSet(9u);
-    }
-    TIM_ClearIntPending(LPC_TIM3, TIM_MR0_INT);
-}
-
-// ========== ADC: joystick X/Y ==========
-static void cfgADC(void) {
+static void cfgADC(void)
+{
     ADC_Init(ADC_RATE);
 
-    ADC_PinConfig(ADC_CHANNEL_0);   // VRx
-    ADC_PinConfig(ADC_CHANNEL_1);   // VRy
+    ADC_PinConfig(ADC_CHANNEL_0);
+    ADC_PinConfig(ADC_CHANNEL_1);
 
     ADC_BurstCmd(DISABLE);
     ADC_StartCmd(ADC_START_ON_MAT01);
@@ -190,68 +147,74 @@ static void cfgADC(void) {
     NVIC_EnableIRQ(ADC_IRQn);
 }
 
-void ADC_IRQHandler(void) {
-    if (ADC_GlobalGetStatus(ADC_DATA_DONE)) {
-        if (ADC_ChannelGetStatus(ADC_CHANNEL_0, ADC_DATA_DONE)) {
-            ADC_ChannelCmd(ADC_CHANNEL_0, DISABLE);
-            ADC_ChannelCmd(ADC_CHANNEL_1, ENABLE);
+void ADC_IRQHandler(void)
+{
+    fakeTime += 8;   // reloj lógico para battleship
 
-            vrx = ADC_ChannelGetData(ADC_CHANNEL_0);
+    if (!ADC_GlobalGetStatus(ADC_DATA_DONE))
+        return;
 
-            BS_Mode mode = BS_GetMode();
-            if (vrx > UPPER_LIM) {
-                if (mode == MODE_PLACE) BS_Placement_MoveCursor(BS_DIR_RIGHT);
-                else                    BS_Shot_MoveCursor(BS_DIR_RIGHT);
-            } else if (vrx < LOWER_LIM) {
-                if (mode == MODE_PLACE) BS_Placement_MoveCursor(BS_DIR_LEFT);
-                else                    BS_Shot_MoveCursor(BS_DIR_LEFT);
-            }
+    // ==================================================
+    //  CANAL X (VRx)
+    // ==================================================
+    if (ADC_ChannelGetStatus(ADC_CHANNEL_0, ADC_DATA_DONE))
+    {
+        ADC_ChannelCmd(ADC_CHANNEL_0, DISABLE);
+        ADC_ChannelCmd(ADC_CHANNEL_1, ENABLE);
 
-        } else if (ADC_ChannelGetStatus(ADC_CHANNEL_1, ADC_DATA_DONE)) {
-            ADC_ChannelCmd(ADC_CHANNEL_1, DISABLE);
-            ADC_ChannelCmd(ADC_CHANNEL_0, ENABLE);
+        vrx = ADC_ChannelGetData(ADC_CHANNEL_0);
 
-            vry = ADC_ChannelGetData(ADC_CHANNEL_1);
-
-            BS_Mode mode = BS_GetMode();
-            if (vry > UPPER_LIM) {
-                if (mode == MODE_PLACE) BS_Placement_MoveCursor(BS_DIR_UP);
-                else                    BS_Shot_MoveCursor(BS_DIR_UP);
-            } else if (vry < LOWER_LIM) {
-                if (mode == MODE_PLACE) BS_Placement_MoveCursor(BS_DIR_DOWN);
-                else                    BS_Shot_MoveCursor(BS_DIR_DOWN);
-            }
+        if (vrx > UPPER_LIM) {
+            BS_Placement_MoveCursor(BS_DIR_RIGHT);
+        }
+        else if (vrx < LOWER_LIM) {
+            BS_Placement_MoveCursor(BS_DIR_LEFT);
         }
     }
-}
 
-// ========== EINT0: SW joystick (colocar / confirmar / disparar) ==========
-void EINT0_IRQHandler(void) {
-    BS_Mode mode = BS_GetMode();
+    // ==================================================
+    //  CANAL Y (VRy)
+    // ==================================================
+    else if (ADC_ChannelGetStatus(ADC_CHANNEL_1, ADC_DATA_DONE))
+    {
+        ADC_ChannelCmd(ADC_CHANNEL_1, DISABLE);
+        ADC_ChannelCmd(ADC_CHANNEL_0, ENABLE);
 
-    if (mode == MODE_PLACE) {
-        if (!g_allShipsPlaced) {
-            BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
-            if (res == BS_PLACE_ALL_DONE) {
-                g_allShipsPlaced = 1u;
-            }
-            // Si es inválido, la librería se encarga de activar blink interno
-        } else {
-            // Ya coloqué todos los barcos → pasar a modo disparo
-            BS_EnterShotMode();
+        vry = ADC_ChannelGetData(ADC_CHANNEL_1);
+
+        if (vry > UPPER_LIM) {
+            BS_Placement_MoveCursor(BS_DIR_UP);
         }
-    } else { // MODE_SHOT
-        (void)BS_Shot_FireAtCursor();
-        // La lib maneja HIT/MISS y blink con BS_AnimationsUpdate()
+        else if (vry < LOWER_LIM) {
+            BS_Placement_MoveCursor(BS_DIR_DOWN);
+        }
     }
 
-    EXTI_ClearFlag(EXTI_EINT0);
-}
+    // ==================================================
+    //  BOTÓN DEL JOYSTICK → colocar barco
+    // ==================================================
+    uint8_t now = (GPIO_ReadValue(JOY_BTN_PORT) & BIT(JOY_BTN_PIN)) ? 1 : 0;
 
-// ========== EINT1: botón de rotación ==========
-void EINT1_IRQHandler(void) {
-    if (BS_GetMode() == MODE_PLACE && !g_allShipsPlaced) {
-        BS_Placement_RotateCursor();
+    if (now == 0 && joyBtnLast == 1)
+    {
+        BS_PlaceResult r = BS_Placement_TryPlaceCurrentShip(fakeTime);
+
+        if (r == BS_PLACE_ERR_COLLISION)
+        {
+            // blink SUCIO como Arduino ▼▼▼
+            BlinkErrorBusy();
+        }
+        else if (r == BS_PLACE_ERR_OOB)
+        {
+            // blink SUCIO como Arduino ▼▼▼
+            BlinkErrorBusy();
+        }
+        else if (r == BS_PLACE_ALL_DONE)
+        {
+            // Parpadeo final de barcos colocados
+            BlinkErrorBusy();
+        }
     }
-    EXTI_ClearFlag(EXTI_EINT1);
+
+    joyBtnLast = now;
 }
