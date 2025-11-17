@@ -40,36 +40,22 @@ void MAX_HAL_Deselect(void){
     LPC_GPIO0->FIOSET = (1U << MAX_CS_PIN);
 }
 
-void MAX_HAL_SendByte(uint8_t data){
-    uint32_t timeout;
-    volatile uint32_t dummy;
+void MAX_HAL_SendByte(uint8_t data)
+{
+    volatile uint32_t i;
 
-    // 1) Esperar a que el FIFO de transmisión NO esté lleno (TNF = SR[1] = 1)
-    timeout = 1000000u;
-    while ( (LPC_SSP0->SR & (1U << 1)) == 0U ) {   // TNF == 0 -> FIFO lleno
-        if (--timeout == 0U) {
-            // Timeout de seguridad: salimos para no clavarnos
-            return;
-        }
-    }
-
-    // 2) Escribir el dato
+    // Mandar el byte al registro de datos del SSP0
     LPC_SSP0->DR = data;
 
-    // 3) Esperar a que termine la transferencia (BSY = SR[4] -> 0)
-    timeout = 1000000u;
-    while ( (LPC_SSP0->SR & (1U << 4)) != 0U ) {   // BSY == 1 -> ocupado
-        if (--timeout == 0U) {
-            // Timeout de seguridad
-            break;
-        }
+    // Pequeño delay por software para dar tiempo a que se "shiftee"
+    // Ajustá el límite si ves que va muy rápido/lento, pero NO se cuelga nunca.
+    for (i = 0; i < 2000u; i++) {
+        __NOP();    // instrucción vacía (no hace nada, solo consume tiempo)
     }
 
-    // 4) Limpiar FIFO de recepción (RNE = SR[2]) leyendo DR
-    while ( (LPC_SSP0->SR & (1U << 2)) != 0U ) {   // RNE == 1 -> hay dato
-        dummy = LPC_SSP0->DR;
-        (void)dummy;
-    }
+    // Opcional: si querés drenar algo del RX, podés leer DR una vez
+    // (en MAX7219 realmente no lo usás):
+    (void)LPC_SSP0->DR;
 }
 
 void MAX_SPI0_Init(void){
