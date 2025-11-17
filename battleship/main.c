@@ -19,8 +19,8 @@
 #define LOWER_LIM       0x1FFu
 
 // Joystick HW504:
-// VRx -> ADC_CHANNEL_0
-// VRy -> ADC_CHANNEL_1
+// VRx -> ADC_CHANNEL_0 (ej: P0.23 AD0.0)
+// VRy -> ADC_CHANNEL_1 (ej: P0.24 AD0.1)
 // SW  -> P2.10 (entrada con pull-up)
 #define JOY_BTN_PORT    2u
 #define JOY_BTN_PIN     10u
@@ -29,41 +29,77 @@
 #define ROT_BTN_PORT    2u
 #define ROT_BTN_PIN     11u
 
-// ================= SysTick (base de tiempo para la librería) =================
+// =================== Base de tiempo para la librería (TIMER1) ===================
 
-// Tus macros:
-#define CORE          100000u
-#define TICKS         1000u
-#define ST_LOAD       ((TICKS * CORE) - 1u)
+// "milisegundos lógicos" para la lib (no tiene que ser exacto, solo monótono)
+static volatile uint32_t g_animTimeMs = 0u;
 
-// Configuración de SysTick usando tu esquema
-static void configSysTick(void) {
-    SysTick->LOAD = ST_LOAD;
-    SysTick->VAL  = 0u;
-    SysTick->CTRL = 0x07u;   // ENABLE + TICKINT + CLKSOURCE
-    // El SysTick_Handler está en otro archivo (por ejemplo hw_time.c),
-    // y ahí se llama a BS_AnimationsUpdate() y BS_Hal_GetMillis().
+// Prototipos HAL que usa battleship_max
+uint32_t BS_Hal_GetMillis(void);
+uint32_t BS_Hal_GetRandom(void);
+
+// RNG simple
+static uint32_t g_lcg_state = 1234567u;
+
+// Implementación HAL: tiempo
+uint32_t BS_Hal_GetMillis(void) {
+    return g_animTimeMs;
+}
+
+// Implementación HAL: random
+uint32_t BS_Hal_GetRandom(void) {
+    g_lcg_state = 1664525u * g_lcg_state + 1013904223u;
+    return g_lcg_state;
+}
+
+// TIMER1: genera ticks de animación para el blink
+static void Timer1_Init_Anim(void) {
+    TIM_TIMERCFG_Type cfgTimer1;
+    TIM_MATCHCFG_Type cfgMatch10;
+
+    cfgTimer1.prescaleOption = TIM_USVAL;
+    cfgTimer1.prescaleValue  = 1000;   // 1 tick de TC = 1 ms
+
+    TIM_Init(LPC_TIM1, TIM_TIMER_MODE, &cfgTimer1);
+
+    // Match0 cada 100 ms
+    cfgMatch10.matchChannel       = TIM_MATCH_0;
+    cfgMatch10.intOnMatch         = ENABLE;
+    cfgMatch10.resetOnMatch       = ENABLE;
+    cfgMatch10.stopOnMatch        = DISABLE;
+    cfgMatch10.extMatchOutputType = TIM_EXTMATCH_NOTHING;
+    cfgMatch10.matchValue         = 99;   // 0..99 -> 100 ms
+
+    TIM_ConfigMatch(LPC_TIM1, &cfgMatch10);
+    TIM_Cmd(LPC_TIM1, ENABLE);
+
+    NVIC_EnableIRQ(TIMER1_IRQn);
+}
+
+// Handler TIMER1: actualiza tiempo y llama a la animación de la lib
+void TIMER1_IRQHandler(void) {
+    g_animTimeMs += 100u;   // 100 ms por interrupción
+    BS_AnimationsUpdate(g_animTimeMs);
+    TIM_ClearIntPending(LPC_TIM1, TIM_MR0_INT);
 }
 
 // ================= Timer3: cuenta regresiva infinita en bloque 3 =================
 
-// Timer3 a ~1 Hz para llamar BS_CountdownStep()
 static void Timer3_Init_1Hz(void) {
     TIM_TIMERCFG_Type cfgTimer3;
     TIM_MATCHCFG_Type cfgMatch03;
 
-    // Timer base en us, prescale a 1000 -> tick = 1 ms
     cfgTimer3.prescaleOption = TIM_USVAL;
-    cfgTimer3.prescaleValue  = 1000;
+    cfgTimer3.prescaleValue  = 1000;   // 1 ms por tick
     TIM_Init(LPC_TIM3, TIM_TIMER_MODE, &cfgTimer3);
 
-    // Match canal 0 (MR0) para 1 segundo aprox: 1000 ticks de 1 ms
+    // Match0 cada 1000 ms -> 1 segundo
     cfgMatch03.matchChannel       = TIM_MATCH_0;
     cfgMatch03.intOnMatch         = ENABLE;
-    cfgMatch03.stopOnMatch        = DISABLE;
     cfgMatch03.resetOnMatch       = ENABLE;
-    cfgMatch03.extMatchOutputType = TIM_TOGGLE;  // no nos importa la salida
-    cfgMatch03.matchValue         = 999;         // 0..999 -> 1000 ms
+    cfgMatch03.stopOnMatch        = DISABLE;
+    cfgMatch03.extMatchOutputType = TIM_EXTMATCH_NOTHING;
+    cfgMatch03.matchValue         = 999;   // 0..999 -> 1000 ms
 
     TIM_ConfigMatch(LPC_TIM3, &cfgMatch03);
     TIM_Cmd(LPC_TIM3, ENABLE);
@@ -72,10 +108,9 @@ static void Timer3_Init_1Hz(void) {
 }
 
 void TIMER3_IRQHandler(void) {
-    // Cada 1 s aproximado, avanzamos la cuenta regresiva del bloque 3
     uint8_t finished = BS_CountdownStep();
     if (finished) {
-        // Cuando llega a 0, lo reseteamos a 9 para que sea infinito
+        // Cuando llega a 0, reseteamos a 9 para que sea infinito
         BS_CountdownSet(9u);
     }
     TIM_ClearIntPending(LPC_TIM3, TIM_MR0_INT);
@@ -104,9 +139,6 @@ static void GPIO_Port2_UnusedAsOutput(void);
 int main(void) {
     SystemInit();
 
-    // SysTick para base de tiempo de la librería (blink, etc.)
-    configSysTick();
-
     // Inicializar SPI0 + MAX + lógica completa Battleship
     MAX_SPI0_Init();
     BS_GameInit();
@@ -120,6 +152,9 @@ int main(void) {
     BS_CountdownSet(9u);
     Timer3_Init_1Hz();
 
+    // Timer1 para animaciones (blink/error/barcos listos/disparos agua)
+    Timer1_Init_Anim();
+
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
     cfgTimerForADC();
@@ -127,10 +162,10 @@ int main(void) {
 
     while (1) {
         // Todo se maneja por interrupciones:
-        //  - SysTick_Handler (en hw_time.c) -> BS_AnimationsUpdate()
-        //  - TIMER3_IRQHandler -> BS_CountdownStep()
-        //  - ADC_IRQHandler -> joystick + botones
-        __WFI();   // opcional: dormir hasta próxima IRQ
+        //  - TIMER1_IRQHandler -> BS_AnimationsUpdate() (blink)
+        //  - TIMER3_IRQHandler -> BS_CountdownStep() (contador)
+        //  - ADC_IRQHandler    -> joystick + botones
+        __WFI();   // opcional
     }
 }
 
@@ -171,7 +206,7 @@ static void cfgTimerForADC(void) {
     TIM_TIMERCFG_Type cfgTimer;
     TIM_MATCHCFG_Type cfgMatch01;
 
-    // Timer base: prescale en us -> 1 tick = 1000 us = 1 ms
+    // Timer base: prescale en us -> 1 tick = 1 ms
     cfgTimer.prescaleOption = TIM_USVAL;
     cfgTimer.prescaleValue  = 1000;
     TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgTimer);
@@ -182,7 +217,7 @@ static void cfgTimerForADC(void) {
     cfgMatch01.resetOnMatch       = ENABLE;
     cfgMatch01.stopOnMatch        = DISABLE;
     cfgMatch01.extMatchOutputType = TIM_TOGGLE;
-    cfgMatch01.matchValue         = 124;   // 0..124 -> 125 ms aprox.
+    cfgMatch01.matchValue         = 74;   // ~125 ms
 
     TIM_ConfigMatch(LPC_TIM0, &cfgMatch01);
     TIM_Cmd(LPC_TIM0, ENABLE);
@@ -269,7 +304,7 @@ void ADC_IRQHandler(void) {
         }
     }
 
-    // 2) Botón del joystick (SW en P2.10): colocar/confirmar/disparar
+    // 2) Botón del joystick (SW en P2.10): colocar / confirmar / disparar
     {
         uint8_t joyNow = (GPIO_ReadValue(JOY_BTN_PORT) & BIT(JOY_BTN_PIN)) ? 1u : 0u;
 
@@ -281,12 +316,12 @@ void ADC_IRQHandler(void) {
                     // Intentar colocar barco actual (2,4,6)
                     BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
                     if (res == BS_PLACE_ALL_DONE) {
-                        // Ya colocamos los 3 barcos
                         g_allShipsPlaced = 1u;
+                        // La librería puede activar un blink especial hasta confirmar
                     }
-                    // Si res == BS_PLACE_INVALID, la lib maneja el blink de error
+                    // Si res == BS_PLACE_INVALID, la librería activa blink de error
                 } else {
-                    // Todos los barcos ya colocados, estamos aún en MODE_PLACE:
+                    // Todos los barcos ya colocados, y seguimos en MODE_PLACE:
                     // este mismo botón actúa como "confirmar" -> pasamos a modo disparo
                     BS_EnterShotMode();
                 }
@@ -294,9 +329,7 @@ void ADC_IRQHandler(void) {
                 // En modo disparo: este botón dispara al contrincante
                 SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
                 (void)sres;
-                // La librería se encarga de:
-                //  - HIT: mantener led encendido
-                //  - MISS: blink en el agua
+                // La librería decide blink por agua (MISS) o dejar HIT fijo
             }
         }
 
@@ -315,8 +348,4 @@ void ADC_IRQHandler(void) {
 
         rotBtnLast = rotNow;
     }
-
-    // battleship_max se encarga internamente de:
-    //  - refrescar bloques 0,1,2 en cada acción
-    //  - blinks de error, barcos listos, agua, etc. vía BS_AnimationsUpdate()
 }
