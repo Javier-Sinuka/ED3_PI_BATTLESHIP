@@ -1,4 +1,3 @@
-// main.c
 #include "LPC17xx.h"
 #include "lpc17xx_gpio.h"
 #include "lpc17xx_timer.h"
@@ -41,7 +40,8 @@ uint32_t BS_Hal_GetRandom(void);
 
 // SysTick a 1 ms REAL
 static void configSysTick(void) {
-    SystemCoreClockUpdate();              // asegurar valor correcto
+    // Asegurarse de que SystemCoreClock tiene el valor correcto
+    SystemCoreClockUpdate();
 
     uint32_t reload = SystemCoreClock / 1000u;  // 1 ms
 
@@ -109,6 +109,18 @@ void TIMER3_IRQHandler(void) {
 static volatile uint32_t vrx = 0u;
 static volatile uint32_t vry = 0u;
 
+// Flag: todos los barcos (2,4,6) ya colocados para el jugador actual
+static volatile uint8_t g_allShipsPlaced = 0u;
+
+// Fases de juego: P1 coloca, P2 coloca, luego disparos J1 sobre J2
+typedef enum {
+    PHASE_P1_PLACE = 0,
+    PHASE_P2_PLACE,
+    PHASE_SHOTS
+} GamePhase_t;
+
+static volatile GamePhase_t g_phase = PHASE_P1_PLACE;
+
 // Prototipos
 static void cfgGPIO(void);
 static void cfgTimerForADC(void);
@@ -130,6 +142,10 @@ int main(void) {
     BS_CountdownSet(9u);
     Timer3_Init_1Hz();
 
+    // Estado inicial de juego
+    g_allShipsPlaced = 0u;
+    g_phase = PHASE_P1_PLACE;
+
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
     cfgTimerForADC();
@@ -140,8 +156,8 @@ int main(void) {
         //  - SysTick_Handler -> BS_AnimationsUpdate()
         //  - TIMER3_IRQHandler -> BS_CountdownStep()
         //  - ADC_IRQHandler -> joystick analógico
-        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar / cambio jugador)
-        __WFI();   // dormir hasta próxima IRQ
+        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar)
+        __WFI();   // opcional: dormir hasta próxima IRQ
     }
 }
 
@@ -234,12 +250,6 @@ static void cfgADC(void) {
 }
 
 void ADC_IRQHandler(void) {
-    if (BS_GetMode() == MODE_GAME_OVER) {
-        // Ya terminó el juego; ignoramos joystick analógico
-        (void)ADC_GlobalGetStatus(ADC_DATA_DONE);
-        return;
-    }
-
     // 1) Lectura del joystick analógico (VRx / VRy)
     if (ADC_GlobalGetStatus(ADC_DATA_DONE)) {
         if (ADC_ChannelGetStatus(ADC_CHANNEL_0, ADC_DATA_DONE)) {
@@ -249,19 +259,20 @@ void ADC_IRQHandler(void) {
 
             vrx = ADC_ChannelGetData(ADC_CHANNEL_0);
 
+            // Movimiento horizontal con VRx
             BS_Mode mode = BS_GetMode();
             if (vrx > UPPER_LIM) {
                 // derecha
                 if (mode == MODE_PLACE) {
                     BS_Placement_MoveCursor(BS_DIR_RIGHT);
-                } else if (mode == MODE_SHOT) {
+                } else { // MODE_SHOT
                     BS_Shot_MoveCursor(BS_DIR_RIGHT);
                 }
             } else if (vrx < LOWER_LIM) {
                 // izquierda
                 if (mode == MODE_PLACE) {
                     BS_Placement_MoveCursor(BS_DIR_LEFT);
-                } else if (mode == MODE_SHOT) {
+                } else {
                     BS_Shot_MoveCursor(BS_DIR_LEFT);
                 }
             }
@@ -273,19 +284,20 @@ void ADC_IRQHandler(void) {
 
             vry = ADC_ChannelGetData(ADC_CHANNEL_1);
 
+            // Movimiento vertical con VRy
             BS_Mode mode = BS_GetMode();
             if (vry > UPPER_LIM) {
                 // arriba
                 if (mode == MODE_PLACE) {
                     BS_Placement_MoveCursor(BS_DIR_UP);
-                } else if (mode == MODE_SHOT) {
+                } else {
                     BS_Shot_MoveCursor(BS_DIR_UP);
                 }
             } else if (vry < LOWER_LIM) {
                 // abajo
                 if (mode == MODE_PLACE) {
                     BS_Placement_MoveCursor(BS_DIR_DOWN);
-                } else if (mode == MODE_SHOT) {
+                } else {
                     BS_Shot_MoveCursor(BS_DIR_DOWN);
                 }
             }
@@ -302,17 +314,54 @@ void ADC_IRQHandler(void) {
 void EINT3_IRQHandler(void) {
     uint32_t statusF = LPC_GPIOINT->IO2IntStatF;
 
-    // --- Botón del joystick (P2.10) -> colocar / avanzar / disparar / cambio jugador ---
+    // --- Botón del joystick (P2.10) -> colocar/confirmar/disparar ---
     if (statusF & (1u << JOY_BTN_PIN)) {
+        // limpiar primero el flag de interrupción
         LPC_GPIOINT->IO2IntClr = (1u << JOY_BTN_PIN);
-        BS_OnConfirmButton(BS_Hal_GetMillis());
+
+        BS_Mode mode = BS_GetMode();
+
+        if (mode == MODE_PLACE) {
+            if (!g_allShipsPlaced) {
+                // Intentar colocar barco actual (2,4,6)
+                BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
+                if (res == BS_PLACE_ALL_DONE) {
+                    // Ya colocamos los 3 barcos del jugador actual
+                    g_allShipsPlaced = 1u;
+                }
+                // Si res == BS_PLACE_INVALID, la lib maneja el blink de error
+            } else {
+                // Todos los barcos del jugador actual ya colocados
+                if (g_phase == PHASE_P1_PLACE) {
+                    // Pasar a colocación del jugador 2
+                    BS_StartSecondPlayerPlacement();
+                    g_allShipsPlaced = 0u;
+                    g_phase = PHASE_P2_PLACE;
+                } else if (g_phase == PHASE_P2_PLACE) {
+                    // Fijar tablero del jugador 2 como oponente y volver al jugador 1
+                    BS_CommitSecondPlayerAndRestoreFirst();
+                    g_allShipsPlaced = 0u;
+                    g_phase = PHASE_SHOTS;
+                    BS_EnterShotMode();   // ahora J1 pasa a modo disparo
+                }
+            }
+        } else { // MODE_SHOT
+            if (g_phase == PHASE_SHOTS) {
+                // En modo disparo: este botón dispara al contrincante (J2)
+                SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
+                (void)sres;
+                // La librería se encarga de:
+                //  - HIT: mantener led encendido (queda fijo en dev2)
+                //  - MISS: blink en el agua vía oppBlinkState
+            }
+        }
     }
 
-    // --- Botón de rotación (P2.11) -> solo durante colocación ---
+    // --- Botón de rotación (P2.11) -> solo durante colocación activa ---
     if (statusF & (1u << ROT_BTN_PIN)) {
         LPC_GPIOINT->IO2IntClr = (1u << ROT_BTN_PIN);
 
-        if (BS_GetMode() == MODE_PLACE) {
+        if (BS_GetMode() == MODE_PLACE && !g_allShipsPlaced) {
             BS_Placement_RotateCursor();
         }
     }

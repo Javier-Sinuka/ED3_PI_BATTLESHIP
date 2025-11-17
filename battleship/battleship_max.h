@@ -1,4 +1,3 @@
-// battleship_max.h
 #ifndef BATTLESHIP_MAX_H
 #define BATTLESHIP_MAX_H
 
@@ -21,9 +20,8 @@ typedef enum {
 
 // ===== Modo interno de juego =====
 typedef enum {
-    MODE_PLACE = 0,    // colocando barcos (P1 o P2)
-    MODE_SHOT  = 1,    // disparando (P1 o P2)
-    MODE_GAME_OVER = 2 // juego terminado
+    MODE_PLACE = 0,   // colocando barcos
+    MODE_SHOT  = 1    // disparando
 } BS_Mode;
 
 // ===== Resultado de disparo =====
@@ -80,15 +78,31 @@ uint8_t BS_Placement_MoveCursor(BS_Dir dir);
 uint8_t BS_Placement_RotateCursor(void);
 
 // Intenta colocar el barco actual en la posición del cursor.
-// (Se usa internamente por BS_OnConfirmButton, pero la dejamos pública.)
+// - Si no entra o se solapa:
+//   * arranca blink de error (no bloqueante)
+//   * devuelve BS_PLACE_INVALID
+// - Si se coloca bien:
+//   * copia SHIP al tablero del jugador
+//   * avanza al siguiente barco (2->4->6)
+//   * devuelve BS_PLACE_OK, o BS_PLACE_ALL_DONE si era el último
 BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs);
 
-// ==== API de transición y confirmación de acción ====
+// ==== Modo 2 jugadores (colocación de jugador 1 y 2) ====
 //
-// Esta función se llama en el botón principal:
-//  - En fase de colocación: coloca barcos y avanza de P1->P2->fase de disparos.
-//  - En fase de disparos: realiza el disparo, cambia de jugador o termina el juego.
-void BS_OnConfirmButton(uint32_t nowMs);
+// Secuencia típica:
+//  1) BS_GameInit() -> J1 coloca barcos con API de colocación.
+//  2) Cuando termina J1 (BS_PLACE_ALL_DONE) y el usuario confirma con botón:
+//       BS_StartSecondPlayerPlacement();
+//  3) J2 coloca sus barcos (misma API).
+//  4) Cuando termina J2 y se confirma:
+//       BS_CommitSecondPlayerAndRestoreFirst();
+//       BS_EnterShotMode();   // ahora J1 dispara sobre tablero de J2.
+
+void BS_StartSecondPlayerPlacement(void);
+void BS_CommitSecondPlayerAndRestoreFirst(void);
+
+// ==== API de transición a FASE DE DISPARO ====
+void BS_EnterShotMode(void);
 
 // ==== API de FASE DE DISPARO (bloque 0 + bloque 2) ====
 //
@@ -99,10 +113,10 @@ void BS_OnConfirmButton(uint32_t nowMs);
 uint8_t BS_Shot_MoveCursor(BS_Dir dir);
 
 // Dispara al oponente en la posición del cursor.
-// (Se usa dentro de BS_OnConfirmButton normalmente)
+// Devuelve SHOT_HIT_RES, SHOT_MISS_RES o SHOT_REPEAT.
 SHOT_RESULT_t BS_Shot_FireAtCursor(void);
 
-// Devuelve 1 si todos los barcos del oponente (del jugador activo) fueron destruidos.
+// Devuelve 1 si todos los barcos del oponente fueron destruidos.
 uint8_t BS_Shot_OpponentAllDestroyed(void);
 
 #endif // BATTLESHIP_MAX_H
