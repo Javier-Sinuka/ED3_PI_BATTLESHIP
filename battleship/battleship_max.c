@@ -136,6 +136,7 @@ static void boardToRowsOpponent(const BATTLESHIP_STATUS_Type b[8][8],
     }
 }
 
+// (No la usamos ahora, pero la dejo por si querés tablero random más adelante)
 static void placeShipRandom(BATTLESHIP_STATUS_Type b[8][8], int len){
     int tries;
     for(tries=0; tries<100; tries++){
@@ -184,14 +185,14 @@ static void drawOpponentFrame(uint8_t blinkOn){
         MAX_DrawRows(BS_DEV_OPPONENT, NP_rows);
         return;
     }
-    boardToRowsOpponent(*getEnemyBoard(), rows, blinkOn);
+    boardToRowsOpponent(getEnemyBoard(), rows, blinkOn);
     MAX_DrawRows(BS_DEV_OPPONENT, rows);
 }
 
 // ========= Render jugador (dev1) y pivote (dev0) =========
 
 static void renderPlayerDev1(void){
-    boardToRowsPlayer(*getMyBoard(), player_rows);
+    boardToRowsPlayer(getMyBoard(), player_rows);
     MAX_DrawRows(BS_DEV_PLAYER, player_rows);
 }
 
@@ -502,16 +503,16 @@ uint8_t BS_Placement_MoveCursor(BS_Dir dir){
     len = SHIP_LIST[ship_index];
     switch(dir){
     case BS_DIR_LEFT:
-        moved = moveLeft(&prow,&pcol,cur_ori,len, *getMyBoard(),0U);
+        moved = moveLeft(&prow,&pcol,cur_ori,len, getMyBoard(),0U);
         break;
     case BS_DIR_RIGHT:
-        moved = moveRight(&prow,&pcol,cur_ori,len,*getMyBoard(),0U);
+        moved = moveRight(&prow,&pcol,cur_ori,len,getMyBoard(),0U);
         break;
     case BS_DIR_UP:
-        moved = moveUp(&prow,&pcol,cur_ori,len,   *getMyBoard(),0U);
-
+        moved = moveUp(&prow,&pcol,cur_ori,len,   getMyBoard(),0U);
+        break;
     case BS_DIR_DOWN:
-        moved = moveDown(&prow,&pcol,cur_ori,len, *getMyBoard(),0U);
+        moved = moveDown(&prow,&pcol,cur_ori,len, getMyBoard(),0U);
         break;
     default:
         break;
@@ -528,7 +529,7 @@ uint8_t BS_Placement_RotateCursor(void){
     if(mode!=MODE_PLACE || all_ships_placed) return 0U;
     len = SHIP_LIST[ship_index];
     newOri = (cur_ori==ORI_H ? ORI_V : ORI_H);
-    if(canPlaceSegment(prow,pcol,newOri,len,*getMyBoard(),0U)){
+    if(canPlaceSegment(prow,pcol,newOri,len,getMyBoard(),0U)){
         cur_ori = newOri;
         renderDev0_withPreview(1U);
         return 1U;
@@ -542,7 +543,7 @@ BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs){
     if(all_ships_placed) return BS_PLACE_ALL_DONE;
 
     len = SHIP_LIST[ship_index];
-    if(!canPlaceSegment(prow,pcol,cur_ori,len,*getMyBoard(),1U)){
+    if(!canPlaceSegment(prow,pcol,cur_ori,len,getMyBoard(),1U)){
         startErrorBlink(nowMs);
         return BS_PLACE_INVALID;
     }
@@ -573,16 +574,16 @@ uint8_t BS_Shot_MoveCursor(BS_Dir dir){
     // Solo nos interesa permanecer dentro de bordes, usamos mi tablero para límites.
     switch(dir){
     case BS_DIR_LEFT:
-        moved = moveLeft(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
+        moved = moveLeft(&prow,&pcol,ORI_H,1U,getMyBoard(),0U);
         break;
     case BS_DIR_RIGHT:
-        moved = moveRight(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
+        moved = moveRight(&prow,&pcol,ORI_H,1U,getMyBoard(),0U);
         break;
     case BS_DIR_UP:
-        moved = moveUp(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
+        moved = moveUp(&prow,&pcol,ORI_H,1U,getMyBoard(),0U);
         break;
     case BS_DIR_DOWN:
-        moved = moveDown(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
+        moved = moveDown(&prow,&pcol,ORI_H,1U,getMyBoard(),0U);
         break;
     default:
         break;
@@ -600,7 +601,7 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
     if(mode!=MODE_SHOT) return SHOT_NONE;
 
     // Aplica disparo sobre tablero lógico del oponente:
-    res = applyShotAtBoard(*getEnemyBoard(), prow, pcol);
+    res = applyShotAtBoard(getEnemyBoard(), prow, pcol);
 
     // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto rápido)
     drawOpponentFrame(1U);
@@ -608,7 +609,7 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
 }
 
 uint8_t BS_Shot_OpponentAllDestroyed(void){
-    return boardAllShipsDestroyed(*getEnemyBoard());
+    return boardAllShipsDestroyed(getEnemyBoard());
 }
 
 // ====== Botón principal: colocar / avanzar / disparar / cambio de jugador ======
