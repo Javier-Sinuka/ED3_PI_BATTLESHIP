@@ -41,10 +41,34 @@ void MAX_HAL_Deselect(void){
 }
 
 void MAX_HAL_SendByte(uint8_t data){
+    uint32_t timeout;
+    volatile uint32_t dummy;
+
+    // 1) Esperar a que el FIFO de transmisión NO esté lleno (TNF = SR[1] = 1)
+    timeout = 1000000u;
+    while ( (LPC_SSP0->SR & (1U << 1)) == 0U ) {   // TNF == 0 -> FIFO lleno
+        if (--timeout == 0U) {
+            // Timeout de seguridad: salimos para no clavarnos
+            return;
+        }
+    }
+
+    // 2) Escribir el dato
     LPC_SSP0->DR = data;
-    // Esperar mientras SSP0 está ocupado (bit BSY = SR[4])
-    while (LPC_SSP0->SR & (1U << 4)) {
-        // loop vacío
+
+    // 3) Esperar a que termine la transferencia (BSY = SR[4] -> 0)
+    timeout = 1000000u;
+    while ( (LPC_SSP0->SR & (1U << 4)) != 0U ) {   // BSY == 1 -> ocupado
+        if (--timeout == 0U) {
+            // Timeout de seguridad
+            break;
+        }
+    }
+
+    // 4) Limpiar FIFO de recepción (RNE = SR[2]) leyendo DR
+    while ( (LPC_SSP0->SR & (1U << 2)) != 0U ) {   // RNE == 1 -> hay dato
+        dummy = LPC_SSP0->DR;
+        (void)dummy;
     }
 }
 
