@@ -2,26 +2,33 @@
 #include "battleship_max.h"
 
 // ========= Constantes internas =========
-static const uint32_t BLINK_MS      = 180U;  // blink tablero jugador
-static const uint32_t OPP_BLINK_MS  = 300U;  // blink MISSES oponente
+static const uint32_t BLINK_MS      = 180U;  // blink tablero jugador cuando termina de colocar
+static const uint32_t OPP_BLINK_MS  = 300U;  // blink MISSES en tablero de disparos
 static const uint32_t ERR_BLINK_MS  = 90U;   // periodo blink error
 static const uint8_t  ERR_BLINK_TOGGLES = 6U; // 3 ciclos on/off
 
-// 0U = modo juego real (NO se ven los barcos enemigos al inicio)
+// 0U = modo juego real (NO se ven barcos enemigos al inicio)
 // 1U = modo debug (se ven también los SHIP del oponente)
 #define BS_DEBUG_SHOW_ENEMY  0U
 
 // ========= Estado global =========
 
-// Tableros lógicos
+// Dos tableros lógicos fijos:
+//  - player_board   = tablero del Jugador 1
+//  - opponent_board = tablero del Jugador 2
 static BATTLESHIP_STATUS_Type player_board[8][8];
 static BATTLESHIP_STATUS_Type opponent_board[8][8];
 
-// Buffers de display
-static uint8_t piv_rows[8];    // dev0
-static uint8_t player_rows[8]; // dev1
+// Jugador actual: 1 o 2
+static uint8_t currentPlayer = 1U;
+// Etapa de colocación: 1 = colocando P1, 2 = colocando P2, 0 = ya todos colocados
+static uint8_t placementStage = 1U;
 
-// Oponente
+// Buffers de display
+static uint8_t piv_rows[8];    // dev0 (cursor / preview)
+static uint8_t player_rows[8]; // dev1 (tablero jugador activo)
+
+// Oponente "existe" (para mensaje NP si querés usarlo)
 static uint8_t  opponent_exists   = 1U;
 static uint8_t  oppBlinkState     = 1U;
 static uint32_t oppLastBlink      = 0U;
@@ -41,12 +48,12 @@ static const uint8_t digits[10][8] = {
 };
 static uint8_t  current_digit = 9U;
 
-// Colocación
+// Colocación / disparo (cursor)
 static int   prow = 3, pcol = 0;               // cursor barco / disparo
 static ORI_t cur_ori = ORI_H;
 static const uint8_t SHIP_LIST[3] = {2U,4U,6U};  // barcos 2,4,6
 static uint8_t ship_index = 0U;                // 0->2, 1->4, 2->6
-static uint8_t all_ships_placed = 0U;
+static uint8_t all_ships_placed = 0U;          // para el jugador ACTUAL
 static BS_Mode mode = MODE_PLACE;
 
 // Blink tablero jugador cuando terminó de colocar
@@ -59,6 +66,18 @@ static uint8_t  errBlink_active   = 0U;
 static uint8_t  errBlink_togglesRemaining = 0U;
 static uint8_t  errBlink_showBase = 0U; // alterna jugador vs preview
 static uint32_t errBlink_last     = 0U;
+
+// ========= Helpers de selección de tablero según jugador =========
+
+// "Mi" tablero (del jugador activo)
+static BATTLESHIP_STATUS_Type (*getMyBoard(void))[8] {
+    return (currentPlayer == 1U) ? player_board : opponent_board;
+}
+
+// Tablero del oponente (del otro jugador)
+static BATTLESHIP_STATUS_Type (*getEnemyBoard(void))[8] {
+    return (currentPlayer == 1U) ? opponent_board : player_board;
+}
 
 // ========= Helpers de tablero =========
 
@@ -95,12 +114,12 @@ static void boardToRowsOpponent(const BATTLESHIP_STATUS_Type b[8][8],
         for(c=0;c<8;c++){
             BATTLESHIP_STATUS_Type st=b[r][c];
 
-            // En modo juego real:
+            // Modo juego real:
             //   - HIT  siempre visible (LED fijo)
             //   - MISS visible solo cuando blinkOn=1 (blink agua)
             //   - SHIP oculto (solo se ve cuando pasa a HIT)
             //
-            // En modo debug (BS_DEBUG_SHOW_ENEMY=1):
+            // Modo debug (BS_DEBUG_SHOW_ENEMY=1):
             //   - SHIP también se ve fijo desde el inicio.
             if(
                 st==HIT
@@ -165,24 +184,14 @@ static void drawOpponentFrame(uint8_t blinkOn){
         MAX_DrawRows(BS_DEV_OPPONENT, NP_rows);
         return;
     }
-    boardToRowsOpponent(opponent_board, rows, blinkOn);
+    boardToRowsOpponent(*getEnemyBoard(), rows, blinkOn);
     MAX_DrawRows(BS_DEV_OPPONENT, rows);
-}
-
-static void genOpponentBoard(void){
-    boardClear(opponent_board);
-    placeShipRandom(opponent_board, 2);
-    placeShipRandom(opponent_board, 4);
-    placeShipRandom(opponent_board, 6);
-    opponent_exists = 1U;
-    // Con BS_DEBUG_SHOW_ENEMY=0, esto dibuja todo apagado (no se ven SHIP).
-    drawOpponentFrame(1U);
 }
 
 // ========= Render jugador (dev1) y pivote (dev0) =========
 
 static void renderPlayerDev1(void){
-    boardToRowsPlayer(player_board, player_rows);
+    boardToRowsPlayer(*getMyBoard(), player_rows);
     MAX_DrawRows(BS_DEV_PLAYER, player_rows);
 }
 
@@ -260,11 +269,12 @@ static uint8_t moveDown (int *r,int *c, ORI_t ori,uint8_t len,
 // ========= Colocación y commit de barco =========
 
 static void commitShip(uint8_t len){
+    BATTLESHIP_STATUS_Type (*my)[8] = getMyBoard();
     uint8_t k;
     for(k=0;k<len;k++){
         int rr=prow+(cur_ori==ORI_V?(int)k:0);
         int cc=pcol+(cur_ori==ORI_H?(int)k:0);
-        player_board[rr][cc]=SHIP;
+        my[rr][cc]=SHIP;
     }
     renderPlayerDev1();
     renderDev0_withPreview(0U);
@@ -316,6 +326,56 @@ static void drawDigit(uint8_t dev,uint8_t num){
     }
 }
 
+// ========= Helpers de inicio de fases =========
+
+static void BS_StartPlacementForCurrentPlayer(uint32_t nowMs){
+    int r;
+
+    ship_index      = 0U;
+    all_ships_placed= 0U;
+    blink_enabled   = 0U;
+    blink_state     = 0U;
+    last_blink      = nowMs;
+
+    // Cursor inicial de colocación
+    prow = 3;
+    pcol = 0;
+    cur_ori = ORI_H;
+
+    // Renderizar mi tablero (vacío o con lo ya colocado si se reiniciara)
+    renderPlayerDev1();
+
+    // dev0 = tablero jugador + preview del barco actual
+    for(r=0;r<8;r++) piv_rows[r] = 0U;
+    renderDev0_withPreview(1U);
+
+    // dev2 = por ahora sin info de disparos (todo apagado)
+    {
+        uint8_t rows[8] = {0};
+        MAX_DrawRows(BS_DEV_OPPONENT, rows);
+    }
+}
+
+static void BS_StartShotTurnForCurrentPlayer(void){
+    int r;
+    // Desactivar blink de colocación
+    blink_enabled = 0U;
+
+    // Cursor de disparo en dev0
+    for(r=0;r<8;r++) piv_rows[r]=0U;
+    prow = 3;
+    pcol = 0;
+    cur_ori = ORI_H;
+    piv_rows[prow] |= (uint8_t)(1u<<pcol);
+    MAX_DrawRows(BS_DEV_PIVOT, piv_rows);
+
+    // Mi tablero en dev1
+    renderPlayerDev1();
+
+    // Mis disparos sobre el oponente en dev2
+    drawOpponentFrame(1U);
+}
+
 // ========= API pública =========
 
 void BS_GameInit(void){
@@ -325,34 +385,31 @@ void BS_GameInit(void){
 
     boardClear(player_board);
     boardClear(opponent_board);
-    genOpponentBoard();
 
-    prow=3; pcol=0;
-    cur_ori=ORI_H;
-    ship_index=0U;
-    all_ships_placed=0U;
-    mode=MODE_PLACE;
+    currentPlayer   = 1U;     // arranca Jugador 1
+    placementStage  = 1U;     // primero coloca P1
+    mode            = MODE_PLACE;
 
-    blink_enabled=0U;
-    blink_state=0U;
-    last_blink=BS_Hal_GetMillis();
+    blink_enabled   = 0U;
+    blink_state     = 0U;
+    last_blink      = BS_Hal_GetMillis();
 
-    errBlink_active=0U;
-    errBlink_togglesRemaining=0U;
+    errBlink_active = 0U;
+    errBlink_togglesRemaining = 0U;
 
-    oppBlinkState=1U;
-    oppLastBlink=BS_Hal_GetMillis();
+    oppBlinkState   = 1U;
+    oppLastBlink    = BS_Hal_GetMillis();
 
-    current_digit=9U;
+    current_digit   = 9U;
     drawDigit(BS_DEV_COUNTER,current_digit);
 
-    // Inicial: tablero jugador vacío, preview primer barco en dev0
+    // Inicial: tableros vacíos, preview primer barco para P1
     for(r=0;r<8;r++){
         player_rows[r]=0U;
         piv_rows[r]=0U;
     }
     renderPlayerDev1();
-    renderDev0_withPreview(1U);
+    BS_StartPlacementForCurrentPlayer(BS_Hal_GetMillis());
 }
 
 BS_Mode BS_GetMode(void){
@@ -360,7 +417,11 @@ BS_Mode BS_GetMode(void){
 }
 
 void BS_AnimationsUpdate(uint32_t nowMs){
-    // 1) Blink tablero jugador cuando todos los barcos colocados
+    if(mode == MODE_GAME_OVER){
+        return;
+    }
+
+    // 1) Blink tablero jugador cuando todos los barcos colocados (fase PLACE)
     if(blink_enabled && mode==MODE_PLACE){
         if(nowMs - last_blink >= BLINK_MS){
             last_blink = nowMs;
@@ -373,7 +434,7 @@ void BS_AnimationsUpdate(uint32_t nowMs){
         }
     }
 
-    // 2) Blink de MISSES del oponente
+    // 2) Blink de MISSES en tablero de disparos (dev2)
     if(opponent_exists){
         if(nowMs - oppLastBlink >= OPP_BLINK_MS){
             oppLastBlink = nowMs;
@@ -432,16 +493,16 @@ uint8_t BS_Placement_MoveCursor(BS_Dir dir){
     len = SHIP_LIST[ship_index];
     switch(dir){
     case BS_DIR_LEFT:
-        moved = moveLeft(&prow,&pcol,cur_ori,len,player_board,0U);
+        moved = moveLeft(&prow,&pcol,cur_ori,len, *getMyBoard(),0U);
         break;
     case BS_DIR_RIGHT:
-        moved = moveRight(&prow,&pcol,cur_ori,len,player_board,0U);
+        moved = moveRight(&prow,&pcol,cur_ori,len,*getMyBoard(),0U);
         break;
     case BS_DIR_UP:
-        moved = moveUp(&prow,&pcol,cur_ori,len,player_board,0U);
+        moved = moveUp(&prow,&pcol,cur_ori,len,   *getMyBoard(),0U);
         break;
     case BS_DIR_DOWN:
-        moved = moveDown(&prow,&pcol,cur_ori,len,player_board,0U);
+        moved = moveDown(&prow,&pcol,cur_ori,len, *getMyBoard(),0U);
         break;
     default:
         break;
@@ -458,7 +519,7 @@ uint8_t BS_Placement_RotateCursor(void){
     if(mode!=MODE_PLACE || all_ships_placed) return 0U;
     len = SHIP_LIST[ship_index];
     newOri = (cur_ori==ORI_H ? ORI_V : ORI_H);
-    if(canPlaceSegment(prow,pcol,newOri,len,player_board,0U)){
+    if(canPlaceSegment(prow,pcol,newOri,len,*getMyBoard(),0U)){
         cur_ori = newOri;
         renderDev0_withPreview(1U);
         return 1U;
@@ -472,7 +533,7 @@ BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs){
     if(all_ships_placed) return BS_PLACE_ALL_DONE;
 
     len = SHIP_LIST[ship_index];
-    if(!canPlaceSegment(prow,pcol,cur_ori,len,player_board,1U)){
+    if(!canPlaceSegment(prow,pcol,cur_ori,len,*getMyBoard(),1U)){
         startErrorBlink(nowMs);
         return BS_PLACE_INVALID;
     }
@@ -492,23 +553,6 @@ BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs){
     }
 }
 
-// ====== Transición a disparos ======
-
-void BS_EnterShotMode(void){
-    int r;
-    if(mode!=MODE_PLACE) return;
-
-    blink_enabled=0U;
-    MAX_DrawRows(BS_DEV_PLAYER, player_rows);
-
-    for(r=0;r<8;r++) piv_rows[r]=0U;
-    prow=3; pcol=0;
-    piv_rows[prow] |= (uint8_t)(1u<<pcol);
-    MAX_DrawRows(BS_DEV_PIVOT, piv_rows);
-
-    mode = MODE_SHOT;
-}
-
 // ====== FASE DE DISPARO ======
 
 uint8_t BS_Shot_MoveCursor(BS_Dir dir){
@@ -517,18 +561,19 @@ uint8_t BS_Shot_MoveCursor(BS_Dir dir){
 
     if(mode!=MODE_SHOT) return 0U;
 
+    // Solo nos interesa permanecer dentro de bordes, usaremos mi tablero para límites.
     switch(dir){
     case BS_DIR_LEFT:
-        moved = moveLeft(&prow,&pcol,ORI_H,1U,player_board,0U);
+        moved = moveLeft(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
         break;
     case BS_DIR_RIGHT:
-        moved = moveRight(&prow,&pcol,ORI_H,1U,player_board,0U);
+        moved = moveRight(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
         break;
     case BS_DIR_UP:
-        moved = moveUp(&prow,&pcol,ORI_H,1U,player_board,0U);
+        moved = moveUp(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
         break;
     case BS_DIR_DOWN:
-        moved = moveDown(&prow,&pcol,ORI_H,1U,player_board,0U);
+        moved = moveDown(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
         break;
     default:
         break;
@@ -546,9 +591,7 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
     if(mode!=MODE_SHOT) return SHOT_NONE;
 
     // Aplica disparo sobre tablero lógico del oponente:
-    //  - SHIP -> HIT  (queda LED fijo en drawOpponentFrame)
-    //  - WATER -> MISS (blink agua vía oppBlinkState)
-    res = applyShotAtBoard(opponent_board, prow, pcol);
+    res = applyShotAtBoard(*getEnemyBoard(), prow, pcol);
 
     // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto "rápido")
     drawOpponentFrame(1U);
@@ -556,5 +599,60 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
 }
 
 uint8_t BS_Shot_OpponentAllDestroyed(void){
-    return boardAllShipsDestroyed(opponent_board);
+    return boardAllShipsDestroyed(*getEnemyBoard());
+}
+
+// ====== Botón principal: colocar / avanzar / disparar / cambio de jugador ======
+
+void BS_OnConfirmButton(uint32_t nowMs){
+    if(mode == MODE_GAME_OVER){
+        // Juego terminado: ignorar
+        return;
+    }
+
+    if(mode == MODE_PLACE){
+        // Etapa de colocación (P1 o P2)
+        if(!all_ships_placed){
+            // Intentar colocar barco actual
+            BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(nowMs);
+            (void)res; // el estado interno ya se maneja adentro
+            return;
+        }else{
+            // Ya colocó todos los barcos el jugador actual
+            if(placementStage == 1U){
+                // P1 terminó -> pasar a colocación de P2
+                currentPlayer  = 2U;
+                placementStage = 2U;
+                all_ships_placed = 0U;
+                BS_StartPlacementForCurrentPlayer(nowMs);
+            }else if(placementStage == 2U){
+                // P2 terminó -> pasar a fase de disparos, comenzando por P2
+                placementStage = 0U;
+                mode           = MODE_SHOT;
+                currentPlayer  = 2U; // Jugador 2 dispara primero
+                BS_StartShotTurnForCurrentPlayer();
+            }
+        }
+    }else if(mode == MODE_SHOT){
+        // Etapa de disparos
+        SHOT_RESULT_t res = BS_Shot_FireAtCursor();
+        if(res == SHOT_NONE || res == SHOT_REPEAT){
+            // Disparo inválido/repetido: no cambiamos de jugador
+            return;
+        }
+
+        // ¿El jugador activo destruyó todos los barcos del oponente?
+        if(BS_Shot_OpponentAllDestroyed()){
+            // Juego terminado
+            mode = MODE_GAME_OVER;
+            MAX_ClearAll();
+            return;
+        }
+
+        // Cambiar de jugador: 1 <-> 2
+        currentPlayer = (currentPlayer == 1U) ? 2U : 1U;
+        // Mantener en fase de disparos
+        mode = MODE_SHOT;
+        BS_StartShotTurnForCurrentPlayer();
+    }
 }
