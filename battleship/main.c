@@ -17,13 +17,16 @@
 #define LOWER_LIM         0x1FFu
 
 // Joystick HW504
+// VRx -> ADC_CHANNEL_0
+// VRy -> ADC_CHANNEL_1
+// SW  -> P2.10 (GPIO entrada con pull-up)
 #define JOY_BTN_PORT      2u
 #define JOY_BTN_PIN       10u
 
 static volatile uint32_t vrx = 0;
 static volatile uint32_t vry = 0;
 static volatile uint32_t fakeTime = 0;
-static volatile uint8_t joyBtnLast = 1;    // pull-up → 1 = no presionado
+static volatile uint8_t  joyBtnLast = 1;    // pull-up → 1 = no presionado
 
 // ======================================================
 //  PROTOTIPOS
@@ -32,7 +35,7 @@ static void cfgGPIO(void);
 static void cfgTimerForADC(void);
 static void cfgADC(void);
 
-// Blink sucio
+// Blink sucio por software
 static void BlinkErrorBusy(void);
 
 // ======================================================
@@ -45,10 +48,10 @@ int main(void)
 
     // Init MAX7219 + Battleship Logic
     MAX_SPI0_Init();
-    BS_GameInit();   // bloque0 pivote, bloque1 tablero propio, bloque2 enemigo
+    BS_GameInit();   // bloque0 pivote/barcos, bloque1 jugador, bloque2 contrincante, bloque3 contador (si lo usás en la lib)
 
     cfgGPIO();
-    cfgTimerForADC();
+    cfgTimerForADC();   // Timer0 con matchValue = 124
     cfgADC();
 
     while(1)
@@ -56,29 +59,28 @@ int main(void)
         __WFI();   // Todo se maneja por IRQ
     }
 
-    return 0;
+    // Nunca llega acá
+    // return 0;
 }
 
 // ======================================================
-//  SOFTWARE BLINK (como Arduino)
+//  SOFTWARE BLINK (como Arduino, pero a nivel bloque)
+//  Parpadea el bloque del jugador cambiando la intensidad
 // ======================================================
 
 static void BlinkErrorBusy(void)
 {
-    // Vamos a blinkear 4 veces como en el Arduino
+    // 4 parpadeos rápidos
     for (int i = 0; i < 4; i++)
     {
-        // Mostrar barco actual (bit conflictivo) encendido
-        BS_Placement_ShowCurrentPreview(1);
+        // muy tenue
+        MAX_SetIntensity(BS_DEV_PLAYER, 0);
         for (volatile int d = 0; d < 90000; d++);
 
-        // Apagarlo
-        BS_Placement_ShowCurrentPreview(0);
+        // intensidad media
+        MAX_SetIntensity(BS_DEV_PLAYER, 8);
         for (volatile int d = 0; d < 90000; d++);
     }
-
-    // Dejarlo encendido nuevamente
-    BS_Placement_ShowCurrentPreview(1);
 }
 
 // ======================================================
@@ -89,18 +91,19 @@ static void cfgGPIO(void)
 {
     PINSEL_CFG_Type cfg;
 
+    // P2.10 como GPIO con pull-up (botón SW del joystick)
     cfg.portNum   = PINSEL_PORT_2;
     cfg.pinNum    = PINSEL_PIN_10;
-    cfg.funcNum   = PINSEL_FUNC_0;
+    cfg.funcNum   = PINSEL_FUNC_0;        // GPIO
     cfg.pinMode   = PINSEL_PULLUP;
     cfg.openDrain = PINSEL_OD_NORMAL;
     PINSEL_ConfigPin(&cfg);
 
-    GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0);
+    GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0);  // entrada
 }
 
 // ======================================================
-//  TIMER0 – Trigger para ADC (match en 124 como pediste)
+//  TIMER0 – Trigger para ADC (match en 124, como pediste)
 // ======================================================
 
 static void cfgTimerForADC(void)
@@ -117,27 +120,29 @@ static void cfgTimerForADC(void)
     m1.resetOnMatch       = ENABLE;
     m1.stopOnMatch        = DISABLE;
     m1.extMatchOutputType = TIM_TOGGLE;
-    m1.matchValue         = 124;     // valor original
+    m1.matchValue         = 124;     // valor original (no modificado)
 
     TIM_ConfigMatch(LPC_TIM0, &m1);
     TIM_Cmd(LPC_TIM0, ENABLE);
 }
 
 // ======================================================
-//  ADC – Joystick X/Y + botón
+//  ADC – Joystick X/Y + botón (leer botón en la misma IRQ)
 // ======================================================
 
 static void cfgADC(void)
 {
     ADC_Init(ADC_RATE);
 
-    ADC_PinConfig(ADC_CHANNEL_0);
-    ADC_PinConfig(ADC_CHANNEL_1);
+    // VRx y VRy
+    ADC_PinConfig(ADC_CHANNEL_0);   // VRx
+    ADC_PinConfig(ADC_CHANNEL_1);   // VRy
 
     ADC_BurstCmd(DISABLE);
     ADC_StartCmd(ADC_START_ON_MAT01);
     ADC_EdgeStartConfig(ADC_START_ON_FALLING);
 
+    // Arrancamos leyendo CH0
     ADC_ChannelCmd(ADC_CHANNEL_0, ENABLE);
     ADC_ChannelCmd(ADC_CHANNEL_1, DISABLE);
 
@@ -149,7 +154,7 @@ static void cfgADC(void)
 
 void ADC_IRQHandler(void)
 {
-    fakeTime += 8;   // reloj lógico para battleship
+    fakeTime += 8;   // reloj lógico para BS_Placement_TryPlaceCurrentShip()
 
     if (!ADC_GlobalGetStatus(ADC_DATA_DONE))
         return;
@@ -193,28 +198,28 @@ void ADC_IRQHandler(void)
     // ==================================================
     //  BOTÓN DEL JOYSTICK → colocar barco
     // ==================================================
-    uint8_t now = (GPIO_ReadValue(JOY_BTN_PORT) & BIT(JOY_BTN_PIN)) ? 1 : 0;
-
-    if (now == 0 && joyBtnLast == 1)
     {
-        BS_PlaceResult r = BS_Placement_TryPlaceCurrentShip(fakeTime);
+        uint8_t now = (GPIO_ReadValue(JOY_BTN_PORT) & BIT(JOY_BTN_PIN)) ? 1u : 0u;
 
-        if (r == BS_PLACE_ERR_COLLISION)
+        if (now == 0u && joyBtnLast == 1u)   // flanco de bajada
         {
-            // blink SUCIO como Arduino ▼▼▼
-            BlinkErrorBusy();
+            BS_PlaceResult r = BS_Placement_TryPlaceCurrentShip(fakeTime);
+
+            // IMPORTANTE: acá usamos SOLO enums que sabemos que existen:
+            //  - BS_PLACE_INVALID
+            //  - BS_PLACE_ALL_DONE
+            if (r == BS_PLACE_INVALID)
+            {
+                // Blink sucio cuando no se puede colocar
+                BlinkErrorBusy();
+            }
+            else if (r == BS_PLACE_ALL_DONE)
+            {
+                // Opcional: indicar que se terminaron de colocar los 3 barcos
+                BlinkErrorBusy();
+            }
         }
-        else if (r == BS_PLACE_ERR_OOB)
-        {
-            // blink SUCIO como Arduino ▼▼▼
-            BlinkErrorBusy();
-        }
-        else if (r == BS_PLACE_ALL_DONE)
-        {
-            // Parpadeo final de barcos colocados
-            BlinkErrorBusy();
-        }
+
+        joyBtnLast = now;
     }
-
-    joyBtnLast = now;
 }
