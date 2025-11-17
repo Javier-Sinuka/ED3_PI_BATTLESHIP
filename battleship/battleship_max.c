@@ -28,7 +28,7 @@ static uint8_t placementStage = 1U;
 static uint8_t piv_rows[8];    // dev0 (cursor / preview)
 static uint8_t player_rows[8]; // dev1 (tablero jugador activo)
 
-// Oponente "existe" (para mensaje NP si querés usarlo)
+// Oponente "existe" (para mensaje NP si lo usaras)
 static uint8_t  opponent_exists   = 1U;
 static uint8_t  oppBlinkState     = 1U;
 static uint32_t oppLastBlink      = 0U;
@@ -326,6 +326,15 @@ static void drawDigit(uint8_t dev,uint8_t num){
     }
 }
 
+// ========= Helper: apagar todas las matrices =========
+
+static void BS_ClearAllDevices(void){
+    uint8_t d;
+    for(d = 0U; d < 4U; d++){
+        MAX_Clear(d);
+    }
+}
+
 // ========= Helpers de inicio de fases =========
 
 static void BS_StartPlacementForCurrentPlayer(uint32_t nowMs){
@@ -342,14 +351,14 @@ static void BS_StartPlacementForCurrentPlayer(uint32_t nowMs){
     pcol = 0;
     cur_ori = ORI_H;
 
-    // Renderizar mi tablero (vacío o con lo ya colocado si se reiniciara)
+    // Renderizar mi tablero
     renderPlayerDev1();
 
     // dev0 = tablero jugador + preview del barco actual
     for(r=0;r<8;r++) piv_rows[r] = 0U;
     renderDev0_withPreview(1U);
 
-    // dev2 = por ahora sin info de disparos (todo apagado)
+    // dev2 = sin info de disparos (apagado)
     {
         uint8_t rows[8] = {0};
         MAX_DrawRows(BS_DEV_OPPONENT, rows);
@@ -500,7 +509,7 @@ uint8_t BS_Placement_MoveCursor(BS_Dir dir){
         break;
     case BS_DIR_UP:
         moved = moveUp(&prow,&pcol,cur_ori,len,   *getMyBoard(),0U);
-        break;
+
     case BS_DIR_DOWN:
         moved = moveDown(&prow,&pcol,cur_ori,len, *getMyBoard(),0U);
         break;
@@ -561,7 +570,7 @@ uint8_t BS_Shot_MoveCursor(BS_Dir dir){
 
     if(mode!=MODE_SHOT) return 0U;
 
-    // Solo nos interesa permanecer dentro de bordes, usaremos mi tablero para límites.
+    // Solo nos interesa permanecer dentro de bordes, usamos mi tablero para límites.
     switch(dir){
     case BS_DIR_LEFT:
         moved = moveLeft(&prow,&pcol,ORI_H,1U,*getMyBoard(),0U);
@@ -593,7 +602,7 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
     // Aplica disparo sobre tablero lógico del oponente:
     res = applyShotAtBoard(*getEnemyBoard(), prow, pcol);
 
-    // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto "rápido")
+    // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto rápido)
     drawOpponentFrame(1U);
     return res;
 }
@@ -614,8 +623,7 @@ void BS_OnConfirmButton(uint32_t nowMs){
         // Etapa de colocación (P1 o P2)
         if(!all_ships_placed){
             // Intentar colocar barco actual
-            BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(nowMs);
-            (void)res; // el estado interno ya se maneja adentro
+            (void)BS_Placement_TryPlaceCurrentShip(nowMs);
             return;
         }else{
             // Ya colocó todos los barcos el jugador actual
@@ -643,9 +651,9 @@ void BS_OnConfirmButton(uint32_t nowMs){
 
         // ¿El jugador activo destruyó todos los barcos del oponente?
         if(BS_Shot_OpponentAllDestroyed()){
-            // Juego terminado
+            // Juego terminado: apagar todas las matrices
             mode = MODE_GAME_OVER;
-            MAX_ClearAll();
+            BS_ClearAllDevices();
             return;
         }
 
