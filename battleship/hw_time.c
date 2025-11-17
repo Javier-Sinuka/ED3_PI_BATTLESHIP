@@ -1,14 +1,13 @@
-// hw_time.c
 #include "LPC17xx.h"
 #include "battleship_max.h"
 
 static volatile uint32_t g_msTicks = 0u;
 static uint32_t g_lcg_state = 1234567u;
 
-// SysTick: se llama cada vez que des tu configSysTick() (CORE/TICKS/ST_LOAD)
+// SysTick: se llama según tu configSysTick()
 void SysTick_Handler(void) {
-    g_msTicks++;                      // 1 tick de tiempo (no tiene por qué ser 1 ms real)
-    BS_AnimationsUpdate(g_msTicks);   // la librería decide cómo blinkear según este tiempo
+    g_msTicks++;                      // “ms” lógicos, no hace falta que sea exacto
+    BS_AnimationsUpdate(g_msTicks);   // la librería maneja el blink internamente
 }
 
 uint32_t BS_Hal_GetMillis(void) {

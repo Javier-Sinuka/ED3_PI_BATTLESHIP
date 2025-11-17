@@ -1,4 +1,3 @@
-// main.c
 #include "LPC17xx.h"
 #include "lpc17xx_gpio.h"
 #include "lpc17xx_timer.h"
@@ -29,7 +28,7 @@ static volatile uint32_t vrx = 0u;
 static volatile uint32_t vry = 0u;
 static volatile uint8_t  g_allShipsPlaced = 0u;
 
-// Declaración de tu función de SysTick (definida en otro archivo tuyo)
+// Tu función de SysTick ya definida en otro archivo
 extern void configSysTick(void);
 
 // Prototipos
@@ -44,16 +43,16 @@ static void Timer3_Init_1Hz(void);
 int main(void) {
     SystemInit();
 
-    // Tu configuración de SysTick (usa CORE/TICKS/ST_LOAD)
+    // SysTick como reloj de la librería
     configSysTick();   // SysTick_Handler está en hw_time.c
 
     // MAX7219 + lógica Battleship
     MAX_SPI0_Init();
     BS_GameInit();
 
-    // Contador del bloque 3: arranca en 9
+    // Contador bloque 3: 9 → 0 en bucle
     BS_CountdownSet(9u);
-    Timer3_Init_1Hz();   // si no lo querés, podrías comentarlo
+    Timer3_Init_1Hz();
 
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
@@ -62,7 +61,7 @@ int main(void) {
     cfgADC();
 
     while (1) {
-        __WFI();   // Espera a interrupciones (ADC, EINT, SysTick, Timer3)
+        __WFI();   // Espera interrupciones
     }
 }
 
@@ -85,7 +84,7 @@ static void cfgGPIO(void) {
     cfgPin.openDrain = PINSEL_OD_NORMAL;
     PINSEL_ConfigPin(&cfgPin);
 
-    // Opcional: dirección como entrada (por GPIO)
+    // También como entrada GPIO
     GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0);
     GPIO_SetDir(ROT_BTN_PORT, BIT(ROT_BTN_PIN), 0);
 }
@@ -109,15 +108,15 @@ static void cfgEINT(void) {
     // EINT0: joystick SW -> colocar / confirmar / disparar
     cfgEXTI.line = EXTI_EINT0;
     EXTI_Config(&cfgEXTI);
-    EXTI_ClearEXTIFlag(EXTI_EINT0);
-    EXTI_Enable(EXTI_EINT0);
+    EXTI_ClearFlag(EXTI_EINT0);
+    EXTI_EnableIRQ(EXTI_EINT0);       // <--- API correcta
     NVIC_EnableIRQ(EINT0_IRQn);
 
     // EINT1: botón rotación
     cfgEXTI.line = EXTI_EINT1;
     EXTI_Config(&cfgEXTI);
-    EXTI_ClearEXTIFlag(EXTI_EINT1);
-    EXTI_Enable(EXTI_EINT1);
+    EXTI_ClearFlag(EXTI_EINT1);
+    EXTI_EnableIRQ(EXTI_EINT1);       // <--- API correcta
     NVIC_EnableIRQ(EINT1_IRQn);
 }
 
@@ -127,7 +126,7 @@ static void cfgTimerForADC(void) {
     TIM_MATCHCFG_Type cfgMatch01;
 
     cfgTimer.prescaleOption = TIM_USVAL;
-    cfgTimer.prescaleValue  = 1000;     // 1 ms -> 1 tick
+    cfgTimer.prescaleValue  = 1000;     // 1 ms
     TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgTimer);
 
     cfgMatch01.matchChannel       = TIM_MATCH_1;
@@ -135,7 +134,7 @@ static void cfgTimerForADC(void) {
     cfgMatch01.resetOnMatch       = ENABLE;
     cfgMatch01.stopOnMatch        = DISABLE;
     cfgMatch01.extMatchOutputType = TIM_TOGGLE;
-    cfgMatch01.matchValue         = 74;      // tu cambio: ~75 ms
+    cfgMatch01.matchValue         = 74;      // ~75 ms
 
     TIM_ConfigMatch(LPC_TIM0, &cfgMatch01);
     TIM_Cmd(LPC_TIM0, ENABLE);
@@ -236,17 +235,17 @@ void EINT0_IRQHandler(void) {
             if (res == BS_PLACE_ALL_DONE) {
                 g_allShipsPlaced = 1u;
             }
-            // Si res == BS_PLACE_INVALID, la librería se encarga de activar el blink
+            // Si es inválido, la librería se encarga de activar blink interno
         } else {
-            // todos los barcos puestos y seguimos en MODE_PLACE -> confirmamos
+            // Ya coloqué todos los barcos → pasar a modo disparo
             BS_EnterShotMode();
         }
     } else { // MODE_SHOT
         (void)BS_Shot_FireAtCursor();
-        // La lib maneja HIT/MISS y animaciones mediante BS_AnimationsUpdate()
+        // La lib maneja HIT/MISS y blink con BS_AnimationsUpdate()
     }
 
-    EXTI_ClearEXTIFlag(EXTI_EINT0);
+    EXTI_ClearFlag(EXTI_EINT0);
 }
 
 // ========== EINT1: botón de rotación ==========
@@ -254,5 +253,5 @@ void EINT1_IRQHandler(void) {
     if (BS_GetMode() == MODE_PLACE && !g_allShipsPlaced) {
         BS_Placement_RotateCursor();
     }
-    EXTI_ClearEXTIFlag(EXTI_EINT1);
+    EXTI_ClearFlag(EXTI_EINT1);
 }
