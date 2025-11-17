@@ -40,12 +40,22 @@ void MAX_HAL_Deselect(void){
     LPC_GPIO0->FIOSET = (1U << MAX_CS_PIN);
 }
 
-void MAX_HAL_SendByte(uint8_t data){
+void MAX_HAL_SendByte(uint8_t data)
+{
+    volatile uint32_t i;
+
+    // Mandar el byte al registro de datos del SSP0
     LPC_SSP0->DR = data;
-    // Esperar mientras SSP0 está ocupado (bit BSY = SR[4])
-    while (LPC_SSP0->SR & (1U << 4)) {
-        // loop vacío
+
+    // Pequeño delay por software para dar tiempo a que se "shiftee"
+    // Ajustá el límite si ves que va muy rápido/lento, pero NO se cuelga nunca.
+    for (i = 0; i < 2000u; i++) {
+        __NOP();    // instrucción vacía (no hace nada, solo consume tiempo)
     }
+
+    // Opcional: si querés drenar algo del RX, podés leer DR una vez
+    // (en MAX7219 realmente no lo usás):
+    (void)LPC_SSP0->DR;
 }
 
 void MAX_SPI0_Init(void){

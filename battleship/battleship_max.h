@@ -48,12 +48,10 @@ typedef enum {
 } BS_PlaceResult;
 
 // ==== HAL mínima requerida ====
-
 uint32_t BS_Hal_GetMillis(void);
 uint32_t BS_Hal_GetRandom(void);
 
 // ==== API de inicialización ====
-
 void BS_GameInit(void);
 BS_Mode BS_GetMode(void);
 
@@ -89,6 +87,20 @@ uint8_t BS_Placement_RotateCursor(void);
 //   * devuelve BS_PLACE_OK, o BS_PLACE_ALL_DONE si era el último
 BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs);
 
+// ==== Modo 2 jugadores (colocación de jugador 1 y 2) ====
+//
+// Secuencia típica:
+//  1) BS_GameInit() -> J1 coloca barcos con API de colocación.
+//  2) Cuando termina J1 (BS_PLACE_ALL_DONE) y el usuario confirma con botón:
+//       BS_StartSecondPlayerPlacement();
+//  3) J2 coloca sus barcos (misma API).
+//  4) Cuando termina J2 y se confirma:
+//       BS_CommitSecondPlayerAndRestoreFirst();
+//       BS_EnterShotMode();   // ahora J1 dispara sobre tablero de J2.
+
+void BS_StartSecondPlayerPlacement(void);
+void BS_CommitSecondPlayerAndRestoreFirst(void);
+
 // ==== API de transición a FASE DE DISPARO ====
 void BS_EnterShotMode(void);
 
@@ -107,4 +119,4 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void);
 // Devuelve 1 si todos los barcos del oponente fueron destruidos.
 uint8_t BS_Shot_OpponentAllDestroyed(void);
 
-#endif // BATTLESHIP_H
+#endif // BATTLESHIP_MAX_H
