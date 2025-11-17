@@ -30,13 +30,8 @@
 #define ROT_BTN_PORT    2u
 #define ROT_BTN_PIN     11u
 
-// ================= SysTick (base de tiempo para la librería) =================
-// Macros usadas en tu esquema
-#define CORE          100000u
-#define TICKS         1000u
-#define ST_LOAD       ((TICKS * CORE) - 1u)
+// ================ Base de tiempo (HAL para la librería) =================
 
-// Base de tiempo en ms y RNG simple
 static volatile uint32_t g_msTicks = 0u;
 static uint32_t lcg_state = 1234567u;
 
@@ -44,11 +39,18 @@ static uint32_t lcg_state = 1234567u;
 uint32_t BS_Hal_GetMillis(void);
 uint32_t BS_Hal_GetRandom(void);
 
-// Configuración de SysTick
+// SysTick a 1 ms REAL
 static void configSysTick(void) {
-    SysTick->LOAD = ST_LOAD;
+    // Asegurarse de que SystemCoreClock tiene el valor correcto
+    SystemCoreClockUpdate();
+
+    uint32_t reload = SystemCoreClock / 1000u;  // 1 ms
+
+    SysTick->LOAD = reload - 1u;
     SysTick->VAL  = 0u;
-    SysTick->CTRL = 0x07u;   // ENABLE + TICKINT + CLKSOURCE
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk |
+                    SysTick_CTRL_TICKINT_Msk   |
+                    SysTick_CTRL_ENABLE_Msk;
 }
 
 // SysTick: incrementa ms y deja que la librería maneje blinks, etc.
@@ -281,67 +283,3 @@ void ADC_IRQHandler(void) {
             if (vry > UPPER_LIM) {
                 // arriba
                 if (mode == MODE_PLACE) {
-                    BS_Placement_MoveCursor(BS_DIR_UP);
-                } else {
-                    BS_Shot_MoveCursor(BS_DIR_UP);
-                }
-            } else if (vry < LOWER_LIM) {
-                // abajo
-                if (mode == MODE_PLACE) {
-                    BS_Placement_MoveCursor(BS_DIR_DOWN);
-                } else {
-                    BS_Shot_MoveCursor(BS_DIR_DOWN);
-                }
-            }
-        }
-    }
-
-    // battleship_max se encarga internamente de:
-    //  - refrescar bloques 0,1,2 en cada acción
-    //  - blinks de error, barcos listos, agua, etc. vía BS_AnimationsUpdate()
-}
-
-// ================ GPIO IRQ: botones (colocar / rotar / disparar) ================
-
-void EINT3_IRQHandler(void) {
-    uint32_t statusF = LPC_GPIOINT->IO2IntStatF;
-
-    // --- Botón del joystick (P2.10) -> colocar/confirmar/disparar ---
-    if (statusF & (1u << JOY_BTN_PIN)) {
-        // limpiar primero el flag de interrupción
-        LPC_GPIOINT->IO2IntClr = (1u << JOY_BTN_PIN);
-
-        BS_Mode mode = BS_GetMode();
-
-        if (mode == MODE_PLACE) {
-            if (!g_allShipsPlaced) {
-                // Intentar colocar barco actual (2,4,6)
-                BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
-                if (res == BS_PLACE_ALL_DONE) {
-                    // Ya colocamos los 3 barcos
-                    g_allShipsPlaced = 1u;
-                }
-                // Si res == BS_PLACE_INVALID, la lib maneja el blink de error
-            } else {
-                // Todos los barcos ya colocados, este botón pasa a modo disparo
-                BS_EnterShotMode();
-            }
-        } else { // MODE_SHOT
-            // En modo disparo: este botón dispara al contrincante
-            SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
-            (void)sres;
-            // La librería se encarga de:
-            //  - HIT: mantener led encendido
-            //  - MISS: blink en el agua
-        }
-    }
-
-    // --- Botón de rotación (P2.11) -> solo durante colocación y antes de terminar ---
-    if (statusF & (1u << ROT_BTN_PIN)) {
-        LPC_GPIOINT->IO2IntClr = (1u << ROT_BTN_PIN);
-
-        if (BS_GetMode() == MODE_PLACE && !g_allShipsPlaced) {
-            BS_Placement_RotateCursor();
-        }
-    }
-}
