@@ -151,15 +151,16 @@ int main(void) {
     cfgTimerForADC();
     cfgADC();
 
+    // *** HABILITAR INTERRUPCIONES GLOBALES ***
+    __enable_irq();
+
     while (1) {
-        // Todo se maneja por interrupciones:
-        //  - SysTick_Handler -> BS_AnimationsUpdate()
-        //  - TIMER3_IRQHandler -> BS_CountdownStep()
-        //  - ADC_IRQHandler -> joystick analógico
-        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar)
-        __WFI();   // opcional: dormir hasta próxima IRQ
+        // Antes estaba __WFI(), lo quitamos para que no se duerma el core.
+        // Todo sigue manejado por las IRQ, pero el CPU queda "despierto".
+        // Podés dejar esto vacío.
     }
 }
+
 
 // ================ GPIO (joystick + rotación + limpieza PORT2) ================
 
