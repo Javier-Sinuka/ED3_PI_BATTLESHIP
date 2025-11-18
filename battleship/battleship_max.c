@@ -1,3 +1,4 @@
+// battleship_max.c
 #include "battleship_max.h"
 
 // ========= Constantes internas =========
@@ -16,15 +17,12 @@ static const uint8_t  ERR_BLINK_TOGGLES = 6U; // 3 ciclos on/off
 static BATTLESHIP_STATUS_Type player_board[8][8];
 static BATTLESHIP_STATUS_Type opponent_board[8][8];
 
-// Backup del tablero del jugador 1 (modo 2 jugadores)
-static BATTLESHIP_STATUS_Type p1_board_backup[8][8];
-
 // Buffers de display
 static uint8_t piv_rows[8];    // dev0
 static uint8_t player_rows[8]; // dev1
 
 // Oponente
-static uint8_t  opponent_exists   = 0U;
+static uint8_t  opponent_exists   = 1U;
 static uint8_t  oppBlinkState     = 1U;
 static uint32_t oppLastBlink      = 0U;
 
@@ -44,10 +42,10 @@ static const uint8_t digits[10][8] = {
 static uint8_t  current_digit = 9U;
 
 // Colocación
-static int   prow = 3, pcol = 0;                 // cursor barco / disparo
+static int   prow = 3, pcol = 0;               // cursor barco / disparo
 static ORI_t cur_ori = ORI_H;
 static const uint8_t SHIP_LIST[3] = {2U,4U,6U};  // barcos 2,4,6
-static uint8_t ship_index = 0U;                  // 0->2, 1->4, 2->6
+static uint8_t ship_index = 0U;                // 0->2, 1->4, 2->6
 static uint8_t all_ships_placed = 0U;
 static BS_Mode mode = MODE_PLACE;
 
@@ -69,16 +67,6 @@ static void boardClear(BATTLESHIP_STATUS_Type b[8][8]){
     for(r=0;r<8;r++){
         for(c=0;c<8;c++){
             b[r][c]=WATER;
-        }
-    }
-}
-
-static void boardCopy(const BATTLESHIP_STATUS_Type src[8][8],
-                      BATTLESHIP_STATUS_Type dst[8][8]){
-    int r,c;
-    for(r=0;r<8;r++){
-        for(c=0;c<8;c++){
-            dst[r][c] = src[r][c];
         }
     }
 }
@@ -337,13 +325,7 @@ void BS_GameInit(void){
 
     boardClear(player_board);
     boardClear(opponent_board);
-    boardClear(p1_board_backup);
-
-    // Al inicio aún no hay tablero de oponente (jugador 2)
-    opponent_exists = 0U;
-    oppBlinkState   = 1U;
-    oppLastBlink    = BS_Hal_GetMillis();
-    drawOpponentFrame(0U);   // muestra "NP" o limpio según implementación
+    genOpponentBoard();
 
     prow=3; pcol=0;
     cur_ori=ORI_H;
@@ -357,6 +339,9 @@ void BS_GameInit(void){
 
     errBlink_active=0U;
     errBlink_togglesRemaining=0U;
+
+    oppBlinkState=1U;
+    oppLastBlink=BS_Hal_GetMillis();
 
     current_digit=9U;
     drawDigit(BS_DEV_COUNTER,current_digit);
@@ -505,54 +490,6 @@ BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs){
         renderDev0_withPreview(0U);
         return BS_PLACE_ALL_DONE;
     }
-}
-
-// ====== Modo 2 jugadores: transición J1 -> J2 en colocación ======
-
-void BS_StartSecondPlayerPlacement(void){
-    int r;
-
-    // Guardar tablero del jugador 1
-    boardCopy(player_board, p1_board_backup);
-
-    // Limpiar tablero visible (será el tablero del jugador 2)
-    boardClear(player_board);
-
-    // Reset de estado de colocación
-    ship_index       = 0U;
-    all_ships_placed = 0U;
-    blink_enabled    = 0U;
-    blink_state      = 0U;
-
-    prow    = 3;
-    pcol    = 0;
-    cur_ori = ORI_H;
-
-    // Refrescar buffers y matrices
-    for(r=0;r<8;r++){
-        player_rows[r] = 0U;
-        piv_rows[r]    = 0U;
-    }
-    renderPlayerDev1();          // dev1 vacío
-    renderDev0_withPreview(1U);  // preview del primer barco en dev0
-}
-
-// Copia el tablero del jugador 2 como oponente, y restaura el tablero del jugador 1
-void BS_CommitSecondPlayerAndRestoreFirst(void){
-    // Copiar tablero del jugador 2 (actual player_board) como tablero del oponente
-    boardCopy(player_board, opponent_board);
-    opponent_exists = 1U;
-    oppBlinkState   = 1U;
-    oppLastBlink    = BS_Hal_GetMillis();
-    drawOpponentFrame(1U);
-
-    // Restaurar tablero del jugador 1 como tablero propio
-    boardCopy(p1_board_backup, player_board);
-    renderPlayerDev1();
-
-    // Asegurar que no quede el blink de "tablero listo"
-    blink_enabled    = 0U;
-    all_ships_placed = 0U;
 }
 
 // ====== Transición a disparos ======

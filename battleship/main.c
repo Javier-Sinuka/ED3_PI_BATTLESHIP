@@ -1,3 +1,4 @@
+// main.c
 #include "LPC17xx.h"
 #include "lpc17xx_gpio.h"
 #include "lpc17xx_timer.h"
@@ -109,17 +110,8 @@ void TIMER3_IRQHandler(void) {
 static volatile uint32_t vrx = 0u;
 static volatile uint32_t vry = 0u;
 
-// Flag: todos los barcos (2,4,6) ya colocados para el jugador actual
+// Flag: todos los barcos (2,4,6) ya colocados
 static volatile uint8_t g_allShipsPlaced = 0u;
-
-// Fases de juego: P1 coloca, P2 coloca, luego disparos J1 sobre J2
-typedef enum {
-    PHASE_P1_PLACE = 0,
-    PHASE_P2_PLACE,
-    PHASE_SHOTS
-} GamePhase_t;
-
-static volatile GamePhase_t g_phase = PHASE_P1_PLACE;
 
 // Prototipos
 static void cfgGPIO(void);
@@ -142,25 +134,20 @@ int main(void) {
     BS_CountdownSet(9u);
     Timer3_Init_1Hz();
 
-    // Estado inicial de juego
-    g_allShipsPlaced = 0u;
-    g_phase = PHASE_P1_PLACE;
-
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
     cfgTimerForADC();
     cfgADC();
 
-    // *** HABILITAR INTERRUPCIONES GLOBALES ***
-    __enable_irq();
-
     while (1) {
-        // Antes estaba __WFI(), lo quitamos para que no se duerma el core.
-        // Todo sigue manejado por las IRQ, pero el CPU queda "despierto".
-        // Podés dejar esto vacío.
+        // Todo se maneja por interrupciones:
+        //  - SysTick_Handler -> BS_AnimationsUpdate()
+        //  - TIMER3_IRQHandler -> BS_CountdownStep()
+        //  - ADC_IRQHandler -> joystick analógico
+        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar)
+        __WFI();   // opcional: dormir hasta próxima IRQ
     }
 }
-
 
 // ================ GPIO (joystick + rotación + limpieza PORT2) ================
 
@@ -327,38 +314,25 @@ void EINT3_IRQHandler(void) {
                 // Intentar colocar barco actual (2,4,6)
                 BS_PlaceResult res = BS_Placement_TryPlaceCurrentShip(BS_Hal_GetMillis());
                 if (res == BS_PLACE_ALL_DONE) {
-                    // Ya colocamos los 3 barcos del jugador actual
+                    // Ya colocamos los 3 barcos
                     g_allShipsPlaced = 1u;
                 }
                 // Si res == BS_PLACE_INVALID, la lib maneja el blink de error
             } else {
-                // Todos los barcos del jugador actual ya colocados
-                if (g_phase == PHASE_P1_PLACE) {
-                    // Pasar a colocación del jugador 2
-                    BS_StartSecondPlayerPlacement();
-                    g_allShipsPlaced = 0u;
-                    g_phase = PHASE_P2_PLACE;
-                } else if (g_phase == PHASE_P2_PLACE) {
-                    // Fijar tablero del jugador 2 como oponente y volver al jugador 1
-                    BS_CommitSecondPlayerAndRestoreFirst();
-                    g_allShipsPlaced = 0u;
-                    g_phase = PHASE_SHOTS;
-                    BS_EnterShotMode();   // ahora J1 pasa a modo disparo
-                }
+                // Todos los barcos ya colocados, este botón pasa a modo disparo
+                BS_EnterShotMode();
             }
         } else { // MODE_SHOT
-            if (g_phase == PHASE_SHOTS) {
-                // En modo disparo: este botón dispara al contrincante (J2)
-                SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
-                (void)sres;
-                // La librería se encarga de:
-                //  - HIT: mantener led encendido (queda fijo en dev2)
-                //  - MISS: blink en el agua vía oppBlinkState
-            }
+            // En modo disparo: este botón dispara al contrincante
+            SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
+            (void)sres;
+            // La librería se encarga de:
+            //  - HIT: mantener led encendido (queda fijo)
+            //  - MISS: blink en el agua y luego se apaga (por animación)
         }
     }
 
-    // --- Botón de rotación (P2.11) -> solo durante colocación activa ---
+    // --- Botón de rotación (P2.11) -> solo durante colocación y antes de terminar ---
     if (statusF & (1u << ROT_BTN_PIN)) {
         LPC_GPIOINT->IO2IntClr = (1u << ROT_BTN_PIN);
 
@@ -367,3 +341,4 @@ void EINT3_IRQHandler(void) {
         }
     }
 }
+//hola
