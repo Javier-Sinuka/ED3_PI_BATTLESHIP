@@ -80,6 +80,7 @@ static void configSysTick(void) {
 void SysTick_Handler(void) {
     g_msTicks++;
     BS_AnimationsUpdate(g_msTicks);
+    LPC_GPDMA->DMACSoftSReq = (1u << 7);
 }
 
 uint32_t BS_Hal_GetMillis(void) {
