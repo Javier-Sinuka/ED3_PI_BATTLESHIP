@@ -1,560 +1,285 @@
-// battleship_max.c
+// main.c
+#include "LPC17xx.h"
+#include "lpc17xx_gpio.h"
+#include "lpc17xx_timer.h"
+#include "lpc17xx_pinsel.h"
+#include "lpc17xx_adc.h"
+
+#include "max_controll.h"
 #include "battleship_max.h"
 
-// ========= Constantes internas =========
-static const uint32_t BLINK_MS      = 180U;  // blink tablero jugador
-static const uint32_t OPP_BLINK_MS  = 300U;  // blink MISSES oponente
-static const uint32_t ERR_BLINK_MS  = 90U;   // periodo blink error
-static const uint8_t  ERR_BLINK_TOGGLES = 6U; // 3 ciclos on/off
+// ================= Macros base =================
 
-// 0U = modo juego real (NO se ven los barcos enemigos al inicio)
-// 1U = modo debug (se ven también los SHIP del oponente)
-#define BS_DEBUG_SHOW_ENEMY  0U
+#define BIT(x)          (1u << (x))
 
-// ========= Estado global =========
+// Ratio del ADC
+#define ADC_RATE        180000u
 
-// Tableros lógicos
-static BATTLESHIP_STATUS_Type player_board[8][8];
-static BATTLESHIP_STATUS_Type opponent_board[8][8];
+// Límites de movimiento del joystick
+#define UPPER_LIM       0xE00u
+#define LOWER_LIM       0x1FFu
 
-// Buffers de display
-static uint8_t piv_rows[8];    // dev0
-static uint8_t player_rows[8]; // dev1
+// Joystick HW504:
+// VRx -> ADC_CHANNEL_0
+// VRy -> ADC_CHANNEL_1
+// SW  -> P2.10 (entrada con pull-up)
+#define JOY_BTN_PORT    2u
+#define JOY_BTN_PIN     10u
 
-// Oponente
-static uint8_t  opponent_exists   = 1U;
-static uint8_t  oppBlinkState     = 1U;
-static uint32_t oppLastBlink      = 0U;
+// Botón extra para rotación de barco -> P2.11
+#define ROT_BTN_PORT    2u
+#define ROT_BTN_PIN     11u
 
-// Contador (dev3)
-static const uint8_t digits[10][8] = {
-    {0x3C,0x66,0x6E,0x76,0x66,0x66,0x66,0x3C}, //0
-    {0x18,0x38,0x78,0x18,0x18,0x18,0x18,0x7E}, //1
-    {0x3C,0x66,0x06,0x0C,0x18,0x60,0x66,0x7E}, //2
-    {0x3C,0x66,0x06,0x1C,0x06,0x06,0x66,0x3C}, //3
-    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x1E}, //4
-    {0x7E,0x60,0x7C,0x06,0x06,0x06,0x66,0x3C}, //5
-    {0x3C,0x66,0x60,0x7C,0x66,0x66,0x66,0x3C}, //6
-    {0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x18}, //7
-    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x66,0x3C}, //8
-    {0x3C,0x66,0x66,0x3E,0x06,0x06,0x66,0x3C}  //9
-};
-static uint8_t  current_digit = 9U;
+// ================ Base de tiempo (HAL para la librería) =================
 
-// Colocación
-static int   prow = 3, pcol = 0;               // cursor barco / disparo
-static ORI_t cur_ori = ORI_H;
-static const uint8_t SHIP_LIST[3] = {2U,4U,6U};  // barcos 2,4,6
-static uint8_t ship_index = 0U;                // 0->2, 1->4, 2->6
-static uint8_t all_ships_placed = 0U;
-static BS_Mode mode = MODE_PLACE;
+static volatile uint32_t g_msTicks = 0u;
+static uint32_t lcg_state = 1234567u;
 
-// Blink tablero jugador cuando terminó de colocar
-static uint8_t  blink_enabled = 0U;
-static uint8_t  blink_state   = 0U;
-static uint32_t last_blink    = 0U;
+// Prototipos HAL que usa la librería
+uint32_t BS_Hal_GetMillis(void);
+uint32_t BS_Hal_GetRandom(void);
 
-// Blink de error al intentar colocar barco inválido
-static uint8_t  errBlink_active   = 0U;
-static uint8_t  errBlink_togglesRemaining = 0U;
-static uint8_t  errBlink_showBase = 0U; // alterna jugador vs preview
-static uint32_t errBlink_last     = 0U;
+// SysTick a 1 ms REAL
+static void configSysTick(void) {
+    // Asegurarse de que SystemCoreClock tiene el valor correcto
+    SystemCoreClockUpdate();
 
-// ========= Helpers de tablero =========
+    uint32_t reload = SystemCoreClock / 1000u;  // 1 ms
 
-static void boardClear(BATTLESHIP_STATUS_Type b[8][8]){
-    int r,c;
-    for(r=0;r<8;r++){
-        for(c=0;c<8;c++){
-            b[r][c]=WATER;
-        }
+    SysTick->LOAD = reload - 1u;
+    SysTick->VAL  = 0u;
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk |
+                    SysTick_CTRL_TICKINT_Msk   |
+                    SysTick_CTRL_ENABLE_Msk;
+}
+
+// SysTick: incrementa ms y deja que la librería maneje blinks, etc.
+void SysTick_Handler(void) {
+    g_msTicks++;
+    BS_AnimationsUpdate(g_msTicks);
+}
+
+uint32_t BS_Hal_GetMillis(void) {
+    return g_msTicks;
+}
+
+uint32_t BS_Hal_GetRandom(void) {
+    // LCG simple
+    lcg_state = 1664525u * lcg_state + 1013904223u;
+    return lcg_state;
+}
+
+// ================= Timer3: cuenta regresiva infinita en bloque 3 =================
+
+// Timer3 a ~1 Hz para llamar BS_CountdownStep()
+static void Timer3_Init_1Hz(void) {
+    TIM_TIMERCFG_Type cfgTimer3;
+    TIM_MATCHCFG_Type cfgMatch03;
+
+    // Timer base en us, prescale a 1000 -> tick = 1 ms
+    cfgTimer3.prescaleOption = TIM_USVAL;
+    cfgTimer3.prescaleValue  = 1000;
+    TIM_Init(LPC_TIM3, TIM_TIMER_MODE, &cfgTimer3);
+
+    // Match canal 0 (MR0) para 1 segundo aprox: 1000 ticks de 1 ms
+    cfgMatch03.matchChannel       = TIM_MATCH_0;
+    cfgMatch03.intOnMatch         = ENABLE;
+    cfgMatch03.stopOnMatch        = DISABLE;
+    cfgMatch03.resetOnMatch       = ENABLE;
+    cfgMatch03.extMatchOutputType = TIM_TOGGLE;  // no nos importa la salida
+    cfgMatch03.matchValue         = 999;         // 0..999 -> 1000 ms
+
+    TIM_ConfigMatch(LPC_TIM3, &cfgMatch03);
+    TIM_Cmd(LPC_TIM3, ENABLE);
+
+    NVIC_EnableIRQ(TIMER3_IRQn);
+}
+
+void TIMER3_IRQHandler(void) {
+    // Cada 1 s aproximado, avanzamos la cuenta regresiva del bloque 3
+    uint8_t finished = BS_CountdownStep();
+    if (finished) {
+        // Cuando llega a 0, lo reseteamos a 9 para que sea infinito
+        BS_CountdownSet(9u);
+    }
+    TIM_ClearIntPending(LPC_TIM3, TIM_MR0_INT);
+}
+
+// ================ Joystick / ADC ================
+
+static volatile uint32_t vrx = 0u;
+static volatile uint32_t vry = 0u;
+
+// Flag: todos los barcos (2,4,6) ya colocados
+static volatile uint8_t g_allShipsPlaced = 0u;
+
+// Prototipos
+static void cfgGPIO(void);
+static void cfgTimerForADC(void);
+static void cfgADC(void);
+static void GPIO_Port2_UnusedAsOutput(void);
+
+// ================ main ================
+
+int main(void) {
+    SystemInit();
+
+    // SysTick para base de tiempo de la librería (blink, etc.)
+    configSysTick();
+
+    // Inicializar SPI0 + MAX + lógica completa Battleship
+    MAX_SPI0_Init();
+    BS_GameInit();
+    // En este punto:
+    //  - Bloque0: pivote/barco en preview
+    //  - Bloque1: tablero jugador
+    //  - Bloque2: contrincante con barcos 2,4,6
+    //  - Bloque3: inicializado por la librería
+
+    // Contador del bloque 3 arranca en 9 y se actualiza con Timer3
+    BS_CountdownSet(9u);
+    Timer3_Init_1Hz();
+
+    cfgGPIO();
+    GPIO_Port2_UnusedAsOutput();
+    cfgTimerForADC();
+    cfgADC();
+
+    while (1) {
+        // Todo se maneja por interrupciones:
+        //  - SysTick_Handler -> BS_AnimationsUpdate()
+        //  - TIMER3_IRQHandler -> BS_CountdownStep()
+        //  - ADC_IRQHandler -> joystick analógico
+        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar)
+        __WFI();   // opcional: dormir hasta próxima IRQ
     }
 }
 
-static void boardToRowsPlayer(const BATTLESHIP_STATUS_Type b[8][8],
-                              uint8_t rows[8])
-{
-    int r,c;
-    for(r=0;r<8;r++){
-        uint8_t v=0U;
-        for(c=0;c<8;c++){
-            if(b[r][c]==SHIP || b[r][c]==HIT){
-                v |= (uint8_t)(1u<<c);
-            }
-        }
-        rows[r]=v;
-    }
+// ================ GPIO (joystick + rotación + limpieza PORT2) ================
+
+static void cfgGPIO(void) {
+    PINSEL_CFG_Type cfgPin;
+
+    // --- Botón del joystick en P2.10 como GPIO entrada con pull-up ---
+    cfgPin.portNum   = PINSEL_PORT_2;
+    cfgPin.pinNum    = PINSEL_PIN_10;
+    cfgPin.funcNum   = PINSEL_FUNC_0;      // GPIO
+    cfgPin.pinMode   = PINSEL_PULLUP;
+    cfgPin.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfgPin);
+
+    GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0); // 0 = input
+
+    // --- Botón de rotación en P2.11 como GPIO entrada con pull-up ---
+    cfgPin.pinNum    = PINSEL_PIN_11;
+    cfgPin.funcNum   = PINSEL_FUNC_0;
+    cfgPin.pinMode   = PINSEL_PULLUP;
+    cfgPin.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfgPin);
+
+    GPIO_SetDir(ROT_BTN_PORT, BIT(ROT_BTN_PIN), 0); // 0 = input
+
+    // --- GPIO interrupt en flanco descendente para P2.10 y P2.11 ---
+    // Limpiamos cualquier pendiente previa
+    LPC_GPIOINT->IO2IntClr = (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
+    // Habilitamos interrupción por flanco de bajada
+    LPC_GPIOINT->IO2IntEnF |= (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
+
+    NVIC_EnableIRQ(EINT3_IRQn);
 }
 
-static void boardToRowsOpponent(const BATTLESHIP_STATUS_Type b[8][8],
-                                uint8_t rows[8], uint8_t blinkOn)
-{
-    int r,c;
-    for(r=0;r<8;r++){
-        uint8_t v=0U;
-        for(c=0;c<8;c++){
-            BATTLESHIP_STATUS_Type st=b[r][c];
-
-            // En modo juego real:
-            //   - HIT  siempre visible (LED fijo)
-            //   - MISS visible solo cuando blinkOn=1 (blink agua)
-            //   - SHIP oculto (solo se ve cuando pasa a HIT)
-            //
-            // En modo debug (BS_DEBUG_SHOW_ENEMY=1):
-            //   - SHIP también se ve fijo desde el inicio.
-            if(
-                st==HIT
-#if BS_DEBUG_SHOW_ENEMY
-                || st==SHIP
-#endif
-              ){
-                v |= (uint8_t)(1u<<c);
-            }else if(st==MISS && blinkOn){
-                v |= (uint8_t)(1u<<c);
-            }
-        }
-        rows[r]=v;
-    }
+// Poner el resto de los pines de PORT2 como salida para que no floten
+static void GPIO_Port2_UnusedAsOutput(void) {
+    uint32_t mask_inputs = (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
+    LPC_GPIO2->FIODIR |= ~mask_inputs;
 }
 
-static void placeShipRandom(BATTLESHIP_STATUS_Type b[8][8], int len){
-    int tries;
-    for(tries=0; tries<100; tries++){
-        uint32_t rnd = BS_Hal_GetRandom();
-        uint8_t vertical = (uint8_t)(rnd & 1u);
-        int r, c;
-        int k;
-        uint8_t freeSpot = 1U;
+// ================ Timer0: trigger para ADC =================
 
-        if(vertical){
-            r = (int)(BS_Hal_GetRandom() % (8-len+1));
-            c = (int)(BS_Hal_GetRandom() % 8);
-        }else{
-            r = (int)(BS_Hal_GetRandom() % 8);
-            c = (int)(BS_Hal_GetRandom() % (8-len+1));
-        }
+static void cfgTimerForADC(void) {
+    TIM_TIMERCFG_Type cfgTimer;
+    TIM_MATCHCFG_Type cfgMatch01;
 
-        for(k=0;k<len;k++){
-            int rr = r + (vertical ? k : 0);
-            int cc = c + (vertical ? 0 : k);
-            if(b[rr][cc]!=WATER){
-                freeSpot = 0U;
-                break;
-            }
-        }
-        if(!freeSpot) continue;
+    // Timer base: prescale en us -> 1 tick = 1000 us = 1 ms
+    cfgTimer.prescaleOption = TIM_USVAL;
+    cfgTimer.prescaleValue  = 1000;
+    TIM_Init(LPC_TIM0, TIM_TIMER_MODE, &cfgTimer);
 
-        for(k=0;k<len;k++){
-            int rr = r + (vertical ? k : 0);
-            int cc = c + (vertical ? 0 : k);
-            b[rr][cc]=SHIP;
-        }
-        return;
-    }
+    // Match canal 1 (MAT0.1) para disparar el ADC cada ~125 ms
+    cfgMatch01.matchChannel       = TIM_MATCH_1;
+    cfgMatch01.intOnMatch         = DISABLE;
+    cfgMatch01.resetOnMatch       = ENABLE;
+    cfgMatch01.stopOnMatch        = DISABLE;
+    cfgMatch01.extMatchOutputType = TIM_TOGGLE;
+    cfgMatch01.matchValue         = 124;   // 0..124 -> 125 ms aprox.
+
+    TIM_ConfigMatch(LPC_TIM0, &cfgMatch01);
+    TIM_Cmd(LPC_TIM0, ENABLE);
 }
 
-// ========= Render oponente (dev2) =========
+// ================ ADC: joystick X/Y =================
 
-static void drawOpponentFrame(uint8_t blinkOn){
-    uint8_t rows[8];
-    if(!opponent_exists){
-        uint8_t NP_rows[8] = {
-            0b10000001, 0b11000001, 0b10100001, 0b10010001,
-            0b10001001, 0b00011110, 0b00010001, 0b00011110
-        };
-        MAX_DrawRows(BS_DEV_OPPONENT, NP_rows);
-        return;
-    }
-    boardToRowsOpponent(opponent_board, rows, blinkOn);
-    MAX_DrawRows(BS_DEV_OPPONENT, rows);
+static void cfgADC(void) {
+    // Inicializar ADC a tu rate
+    ADC_Init(ADC_RATE);
+
+    // Pines analógicos para CH0 (VRx) y CH1 (VRy)
+    ADC_PinConfig(ADC_CHANNEL_0);
+    ADC_PinConfig(ADC_CHANNEL_1);
+
+    // Sin burst, disparo por MAT0.1
+    ADC_BurstCmd(DISABLE);
+    ADC_StartCmd(ADC_START_ON_MAT01);
+    ADC_EdgeStartConfig(ADC_START_ON_FALLING);
+
+    // Empieza leyendo CH0
+    ADC_ChannelCmd(ADC_CHANNEL_0, ENABLE);
+    ADC_ChannelCmd(ADC_CHANNEL_1, DISABLE);
+
+    // Habilitamos interrupción en CH0 y CH1
+    ADC_IntConfig(ADC_CHANNEL_0, ENABLE);
+    ADC_IntConfig(ADC_CHANNEL_1, ENABLE);
+
+    NVIC_EnableIRQ(ADC_IRQn);
 }
 
-static void genOpponentBoard(void){
-    boardClear(opponent_board);
-    placeShipRandom(opponent_board, 2);
-    placeShipRandom(opponent_board, 4);
-    placeShipRandom(opponent_board, 6);
-    opponent_exists = 1U;
-    // Con BS_DEBUG_SHOW_ENEMY=0, esto dibuja todo apagado (no se ven SHIP).
-    drawOpponentFrame(1U);
-}
+void ADC_IRQHandler(void) {
+    // 1) Lectura del joystick analógico (VRx / VRy)
+    if (ADC_GlobalGetStatus(ADC_DATA_DONE)) {
+        if (ADC_ChannelGetStatus(ADC_CHANNEL_0, ADC_DATA_DONE)) {
+            // Cambiar a CH1 para la próxima conversión
+            ADC_ChannelCmd(ADC_CHANNEL_0, DISABLE);
+            ADC_ChannelCmd(ADC_CHANNEL_1, ENABLE);
 
-// ========= Render jugador (dev1) y pivote (dev0) =========
+            vrx = ADC_ChannelGetData(ADC_CHANNEL_0);
 
-static void renderPlayerDev1(void){
-    boardToRowsPlayer(player_board, player_rows);
-    MAX_DrawRows(BS_DEV_PLAYER, player_rows);
-}
-
-// redibuja dev0: base = tablero jugador, + preview de barco si corresponde
-static void renderDev0_withPreview(uint8_t drawPreview){
-    int r;
-    for(r=0;r<8;r++){
-        piv_rows[r]=player_rows[r];
-    }
-
-    if(drawPreview && !all_ships_placed){
-        uint8_t len = SHIP_LIST[ship_index];
-        uint8_t k;
-        for(k=0;k<len;k++){
-            int rr=prow+(cur_ori==ORI_V?(int)k:0);
-            int cc=pcol+(cur_ori==ORI_H?(int)k:0);
-            if(rr>=0 && rr<8 && cc>=0 && cc<8){
-                piv_rows[rr] |= (uint8_t)(1u<<cc);
-            }
-        }
-    }
-    MAX_DrawRows(BS_DEV_PIVOT, piv_rows);
-}
-
-// ========= Movimiento / validación =========
-
-static uint8_t canPlaceSegment(int r,int c,ORI_t ori,uint8_t len,
-                               BATTLESHIP_STATUS_Type board[8][8],
-                               uint8_t checkOverlap)
-{
-    int k;
-    if(ori==ORI_H){
-        if(c<0 || (c+(int)len-1)>7 || r<0 || r>7) return 0U;
-    }else{
-        if(r<0 || (r+(int)len-1)>7 || c<0 || c>7) return 0U;
-    }
-    if(!checkOverlap) return 1U;
-    for(k=0;k<(int)len;k++){
-        int rr=r+(ori==ORI_V?k:0);
-        int cc=c+(ori==ORI_H?k:0);
-        if(board[rr][cc]!=WATER) return 0U;
-    }
-    return 1U;
-}
-
-static uint8_t moveLeft (int *r,int *c, ORI_t ori,uint8_t len,
-                         BATTLESHIP_STATUS_Type b[8][8], uint8_t chk)
-{
-    int nr=*r, nc=*c-1;
-    if(canPlaceSegment(nr,nc,ori,len,b,chk)){*r=nr;*c=nc;return 1U;}
-    return 0U;
-}
-static uint8_t moveRight(int *r,int *c, ORI_t ori,uint8_t len,
-                         BATTLESHIP_STATUS_Type b[8][8], uint8_t chk)
-{
-    int nr=*r, nc=*c+1;
-    if(canPlaceSegment(nr,nc,ori,len,b,chk)){*r=nr;*c=nc;return 1U;}
-    return 0U;
-}
-static uint8_t moveUp   (int *r,int *c, ORI_t ori,uint8_t len,
-                         BATTLESHIP_STATUS_Type b[8][8], uint8_t chk)
-{
-    int nr=*r+1, nc=*c;
-    if(canPlaceSegment(nr,nc,ori,len,b,chk)){*r=nr;*c=nc;return 1U;}
-    return 0U;
-}
-static uint8_t moveDown (int *r,int *c, ORI_t ori,uint8_t len,
-                         BATTLESHIP_STATUS_Type b[8][8], uint8_t chk)
-{
-    int nr=*r-1, nc=*c;
-    if(canPlaceSegment(nr,nc,ori,len,b,chk)){*r=nr;*c=nc;return 1U;}
-    return 0U;
-}
-
-// ========= Colocación y commit de barco =========
-
-static void commitShip(uint8_t len){
-    uint8_t k;
-    for(k=0;k<len;k++){
-        int rr=prow+(cur_ori==ORI_V?(int)k:0);
-        int cc=pcol+(cur_ori==ORI_H?(int)k:0);
-        player_board[rr][cc]=SHIP;
-    }
-    renderPlayerDev1();
-    renderDev0_withPreview(0U);
-}
-
-// ========= Blink de error (no bloqueante) =========
-
-static void startErrorBlink(uint32_t nowMs){
-    errBlink_active   = 1U;
-    errBlink_togglesRemaining = ERR_BLINK_TOGGLES;
-    errBlink_last     = nowMs;
-    errBlink_showBase = 0U; // primero muestro preview
-}
-
-// ========= Disparos y victoria =========
-
-static SHOT_RESULT_t applyShotAtBoard(BATTLESHIP_STATUS_Type b[8][8],
-                                      int r,int c)
-{
-    BATTLESHIP_STATUS_Type st=b[r][c];
-    if(st==SHIP){
-        b[r][c]=HIT;
-        return SHOT_HIT_RES;
-    }
-    if(st==WATER){
-        b[r][c]=MISS;
-        return SHOT_MISS_RES;
-    }
-    return SHOT_REPEAT;
-}
-
-static uint8_t boardAllShipsDestroyed(const BATTLESHIP_STATUS_Type b[8][8]){
-    int r,c;
-    for(r=0;r<8;r++){
-        for(c=0;c<8;c++){
-            if(b[r][c]==SHIP) return 0U;
-        }
-    }
-    return 1U;
-}
-
-// ========= Contador (dev3) =========
-
-static void drawDigit(uint8_t dev,uint8_t num){
-    uint8_t r;
-    if(num>9U) return;
-    for(r=0;r<8;r++){
-        MAX_SetRow(dev, (uint8_t)(7u-r), digits[num][r]);
-    }
-}
-
-// ========= API pública =========
-
-void BS_GameInit(void){
-    int r;
-
-    MAX_InitAll();
-
-    boardClear(player_board);
-    boardClear(opponent_board);
-    genOpponentBoard();
-
-    prow=3; pcol=0;
-    cur_ori=ORI_H;
-    ship_index=0U;
-    all_ships_placed=0U;
-    mode=MODE_PLACE;
-
-    blink_enabled=0U;
-    blink_state=0U;
-    last_blink=BS_Hal_GetMillis();
-
-    errBlink_active=0U;
-    errBlink_togglesRemaining=0U;
-
-    oppBlinkState=1U;
-    oppLastBlink=BS_Hal_GetMillis();
-
-    current_digit=9U;
-    drawDigit(BS_DEV_COUNTER,current_digit);
-
-    // Inicial: tablero jugador vacío, preview primer barco en dev0
-    for(r=0;r<8;r++){
-        player_rows[r]=0U;
-        piv_rows[r]=0U;
-    }
-    renderPlayerDev1();
-    renderDev0_withPreview(1U);
-}
-
-BS_Mode BS_GetMode(void){
-    return mode;
-}
-
-void BS_AnimationsUpdate(uint32_t nowMs){
-    // 1) Blink tablero jugador cuando todos los barcos colocados
-    if(blink_enabled && mode==MODE_PLACE){
-        if(nowMs - last_blink >= BLINK_MS){
-            last_blink = nowMs;
-            blink_state = (uint8_t)!blink_state;
-            if(blink_state){
-                MAX_Clear(BS_DEV_PLAYER);
-            }else{
-                MAX_DrawRows(BS_DEV_PLAYER, player_rows);
-            }
-        }
-    }
-
-    // 2) Blink de MISSES del oponente
-    if(opponent_exists){
-        if(nowMs - oppLastBlink >= OPP_BLINK_MS){
-            oppLastBlink = nowMs;
-            oppBlinkState = (uint8_t)!oppBlinkState;
-            drawOpponentFrame(oppBlinkState);
-        }
-    }
-
-    // 3) Blink de error al intentar colocar barco inválido
-    if(errBlink_active){
-        if(nowMs - errBlink_last >= ERR_BLINK_MS){
-            errBlink_last = nowMs;
-            if(errBlink_togglesRemaining>0U){
-                errBlink_togglesRemaining--;
-                errBlink_showBase = (uint8_t)!errBlink_showBase;
-                if(errBlink_showBase){
-                    MAX_DrawRows(BS_DEV_PIVOT, player_rows);
-                }else{
-                    renderDev0_withPreview(1U);
+            // Movimiento horizontal con VRx
+            BS_Mode mode = BS_GetMode();
+            if (vrx > UPPER_LIM) {
+                // derecha
+                if (mode == MODE_PLACE) {
+                    BS_Placement_MoveCursor(BS_DIR_RIGHT);
+                } else { // MODE_SHOT
+                    BS_Shot_MoveCursor(BS_DIR_RIGHT);
                 }
-            }else{
-                errBlink_active=0U;
-                renderDev0_withPreview(1U);
+            } else if (vrx < LOWER_LIM) {
+                // izquierda
+                if (mode == MODE_PLACE) {
+                    BS_Placement_MoveCursor(BS_DIR_LEFT);
+                } else {
+                    BS_Shot_MoveCursor(BS_DIR_LEFT);
+                }
             }
-        }
-    }
-}
 
-// ====== Contador ======
+        } else if (ADC_ChannelGetStatus(ADC_CHANNEL_1, ADC_DATA_DONE)) {
+            // Cambiar de nuevo a CH0
+            ADC_ChannelCmd(ADC_CHANNEL_1, DISABLE);
+            ADC_ChannelCmd(ADC_CHANNEL_0, ENABLE);
 
-void BS_CountdownSet(uint8_t startValue){
-    if(startValue>9U) startValue=9U;
-    current_digit=startValue;
-    drawDigit(BS_DEV_COUNTER,current_digit);
-}
+            vry = ADC_ChannelGetData(ADC_CHANNEL_1);
 
-uint8_t BS_CountdownStep(void){
-    if(current_digit==0U){
-        drawDigit(BS_DEV_COUNTER,current_digit);
-        return 1U;
-    }
-    current_digit--;
-    drawDigit(BS_DEV_COUNTER,current_digit);
-    if(current_digit==0U) return 1U;
-    return 0U;
-}
-
-// ====== FASE DE COLOCACIÓN ======
-
-uint8_t BS_Placement_MoveCursor(BS_Dir dir){
-    uint8_t len;
-    uint8_t moved=0U;
-
-    if(mode!=MODE_PLACE) return 0U;
-
-    len = SHIP_LIST[ship_index];
-    switch(dir){
-    case BS_DIR_LEFT:
-        moved = moveLeft(&prow,&pcol,cur_ori,len,player_board,0U);
-        break;
-    case BS_DIR_RIGHT:
-        moved = moveRight(&prow,&pcol,cur_ori,len,player_board,0U);
-        break;
-    case BS_DIR_UP:
-        moved = moveUp(&prow,&pcol,cur_ori,len,player_board,0U);
-        break;
-    case BS_DIR_DOWN:
-        moved = moveDown(&prow,&pcol,cur_ori,len,player_board,0U);
-        break;
-    default:
-        break;
-    }
-    if(moved){
-        renderDev0_withPreview(1U);
-    }
-    return moved;
-}
-
-uint8_t BS_Placement_RotateCursor(void){
-    uint8_t len;
-    ORI_t newOri;
-    if(mode!=MODE_PLACE || all_ships_placed) return 0U;
-    len = SHIP_LIST[ship_index];
-    newOri = (cur_ori==ORI_H ? ORI_V : ORI_H);
-    if(canPlaceSegment(prow,pcol,newOri,len,player_board,0U)){
-        cur_ori = newOri;
-        renderDev0_withPreview(1U);
-        return 1U;
-    }
-    return 0U;
-}
-
-BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs){
-    uint8_t len;
-    if(mode!=MODE_PLACE) return BS_PLACE_INVALID;
-    if(all_ships_placed) return BS_PLACE_ALL_DONE;
-
-    len = SHIP_LIST[ship_index];
-    if(!canPlaceSegment(prow,pcol,cur_ori,len,player_board,1U)){
-        startErrorBlink(nowMs);
-        return BS_PLACE_INVALID;
-    }
-
-    commitShip(len);
-
-    if(ship_index < 2U){
-        ship_index++;
-        renderDev0_withPreview(1U);
-        return BS_PLACE_OK;
-    }else{
-        all_ships_placed=1U;
-        blink_enabled=1U;
-        last_blink=nowMs;
-        renderDev0_withPreview(0U);
-        return BS_PLACE_ALL_DONE;
-    }
-}
-
-// ====== Transición a disparos ======
-
-void BS_EnterShotMode(void){
-    int r;
-    if(mode!=MODE_PLACE) return;
-
-    blink_enabled=0U;
-    MAX_DrawRows(BS_DEV_PLAYER, player_rows);
-
-    for(r=0;r<8;r++) piv_rows[r]=0U;
-    prow=3; pcol=0;
-    piv_rows[prow] |= (uint8_t)(1u<<pcol);
-    MAX_DrawRows(BS_DEV_PIVOT, piv_rows);
-
-    mode = MODE_SHOT;
-}
-
-// ====== FASE DE DISPARO ======
-
-uint8_t BS_Shot_MoveCursor(BS_Dir dir){
-    uint8_t moved=0U;
-    int r;
-
-    if(mode!=MODE_SHOT) return 0U;
-
-    switch(dir){
-    case BS_DIR_LEFT:
-        moved = moveLeft(&prow,&pcol,ORI_H,1U,player_board,0U);
-        break;
-    case BS_DIR_RIGHT:
-        moved = moveRight(&prow,&pcol,ORI_H,1U,player_board,0U);
-        break;
-    case BS_DIR_UP:
-        moved = moveUp(&prow,&pcol,ORI_H,1U,player_board,0U);
-        break;
-    case BS_DIR_DOWN:
-        moved = moveDown(&prow,&pcol,ORI_H,1U,player_board,0U);
-        break;
-    default:
-        break;
-    }
-    if(moved){
-        for(r=0;r<8;r++) piv_rows[r]=0U;
-        piv_rows[prow] |= (uint8_t)(1u<<pcol);
-        MAX_DrawRows(BS_DEV_PIVOT, piv_rows);
-    }
-    return moved;
-}
-
-SHOT_RESULT_t BS_Shot_FireAtCursor(void){
-    SHOT_RESULT_t res;
-    if(mode!=MODE_SHOT) return SHOT_NONE;
-
-    // Aplica disparo sobre tablero lógico del oponente:
-    //  - SHIP -> HIT  (queda LED fijo en drawOpponentFrame)
-    //  - WATER -> MISS (blink agua vía oppBlinkState)
-    res = applyShotAtBoard(opponent_board, prow, pcol);
-
-    // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto "rápido")
-    drawOpponentFrame(1U);
-    return res;
-}
-
-uint8_t BS_Shot_OpponentAllDestroyed(void){
-    return boardAllShipsDestroyed(opponent_board);
-}
+            // Movimiento vertical con VRy
+            BS_Mode mode = BS_GetMode();
+            if (vry > UPPER_LIM) {
+                // arriba
+                if (mode == MODE_PLACE) {

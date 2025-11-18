@@ -127,8 +127,14 @@ int main(void) {
     // SysTick para base de tiempo de la librería (blink, etc.)
     configSysTick();
 
-    // Inicializar lógica completa Battleship + MAX internamente
+    // Inicializar SPI0 + MAX + lógica completa Battleship
+    MAX_SPI0_Init();
     BS_GameInit();
+    // En este punto:
+    //  - Bloque0: pivote/barco en preview
+    //  - Bloque1: tablero jugador
+    //  - Bloque2: contrincante con barcos 2,4,6
+    //  - Bloque3: inicializado por la librería
 
     // Contador del bloque 3 arranca en 9 y se actualiza con Timer3
     BS_CountdownSet(9u);
@@ -327,8 +333,8 @@ void EINT3_IRQHandler(void) {
             SHOT_RESULT_t sres = BS_Shot_FireAtCursor();
             (void)sres;
             // La librería se encarga de:
-            //  - HIT: mantener led encendido (queda fijo)
-            //  - MISS: blink en el agua y luego se apaga (por animación)
+            //  - HIT: mantener led encendido
+            //  - MISS: blink en el agua
         }
     }
 
