@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "max_controll.h"
 
+
 // ===== Estados de celda =====
 typedef enum {
     WATER = 0,

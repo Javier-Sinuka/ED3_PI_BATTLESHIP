@@ -163,6 +163,8 @@ int main(void) {
     cfgUART0();
     cfgDMA_UART0_TX();
 
+    data = 0x11;
+
     while (1) {
         // Todo se maneja por interrupciones:
         //  - SysTick_Handler -> BS_AnimationsUpdate()

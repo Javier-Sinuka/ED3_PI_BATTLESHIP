@@ -542,6 +542,7 @@ BS_PlaceResult BS_Placement_TryPlaceCurrentShip(uint32_t nowMs){
 // ====== Transición a disparos ======
 
 void BS_EnterShotMode(void){
+
     int r;
     if(mode!=MODE_PLACE) return;
 
