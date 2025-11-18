@@ -69,6 +69,42 @@ uint32_t BS_Hal_GetRandom(void) {
     return lcg_state;
 }
 
+// ================= Timer3: cuenta regresiva infinita en bloque 3 =================
+
+// Timer3 a ~1 Hz para llamar BS_CountdownStep()
+static void Timer3_Init_1Hz(void) {
+    TIM_TIMERCFG_Type cfgTimer3;
+    TIM_MATCHCFG_Type cfgMatch03;
+
+    // Timer base en us, prescale a 1000 -> tick = 1 ms
+    cfgTimer3.prescaleOption = TIM_USVAL;
+    cfgTimer3.prescaleValue  = 1000;
+    TIM_Init(LPC_TIM3, TIM_TIMER_MODE, &cfgTimer3);
+
+    // Match canal 0 (MR0) para 1 segundo aprox: 1000 ticks de 1 ms
+    cfgMatch03.matchChannel       = TIM_MATCH_0;
+    cfgMatch03.intOnMatch         = ENABLE;
+    cfgMatch03.stopOnMatch        = DISABLE;
+    cfgMatch03.resetOnMatch       = ENABLE;
+    cfgMatch03.extMatchOutputType = TIM_TOGGLE;  // no nos importa la salida
+    cfgMatch03.matchValue         = 999;         // 0..999 -> 1000 ms
+
+    TIM_ConfigMatch(LPC_TIM3, &cfgMatch03);
+    TIM_Cmd(LPC_TIM3, ENABLE);
+
+    NVIC_EnableIRQ(TIMER3_IRQn);
+}
+
+void TIMER3_IRQHandler(void) {
+    // Cada 1 s aproximado, avanzamos la cuenta regresiva del bloque 3
+    uint8_t finished = BS_CountdownStep();
+    if (finished) {
+        // Cuando llega a 0, lo reseteamos a 9 para que sea infinito
+        BS_CountdownSet(9u);
+    }
+    TIM_ClearIntPending(LPC_TIM3, TIM_MR0_INT);
+}
+
 // ================ Joystick / ADC ================
 
 static volatile uint32_t vrx = 0u;
@@ -92,8 +128,11 @@ int main(void) {
     configSysTick();
 
     // Inicializar lógica completa Battleship + MAX internamente
-    // (incluye contador de disparos en bloque 3 arrancando en 0)
     BS_GameInit();
+
+    // Contador del bloque 3 arranca en 9 y se actualiza con Timer3
+    BS_CountdownSet(9u);
+    Timer3_Init_1Hz();
 
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
@@ -103,6 +142,7 @@ int main(void) {
     while (1) {
         // Todo se maneja por interrupciones:
         //  - SysTick_Handler -> BS_AnimationsUpdate()
+        //  - TIMER3_IRQHandler -> BS_CountdownStep()
         //  - ADC_IRQHandler -> joystick analógico
         //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar)
         __WFI();   // opcional: dormir hasta próxima IRQ
@@ -289,7 +329,6 @@ void EINT3_IRQHandler(void) {
             // La librería se encarga de:
             //  - HIT: mantener led encendido (queda fijo)
             //  - MISS: blink en el agua y luego se apaga (por animación)
-            //  - contador de disparos en bloque 3
         }
     }
 
@@ -302,3 +341,4 @@ void EINT3_IRQHandler(void) {
         }
     }
 }
+//hola

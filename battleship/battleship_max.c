@@ -11,9 +11,6 @@ static const uint8_t  ERR_BLINK_TOGGLES = 6U; // 3 ciclos on/off
 // 1U = modo debug (se ven también los SHIP del oponente)
 #define BS_DEBUG_SHOW_ENEMY  0U
 
-// Máximo de disparos permitidos
-#define MAX_SHOTS 20U
-
 // ========= Estado global =========
 
 // Tableros lógicos
@@ -29,10 +26,7 @@ static uint8_t  opponent_exists   = 1U;
 static uint8_t  oppBlinkState     = 1U;
 static uint32_t oppLastBlink      = 0U;
 
-// Contador de disparos (dev3)
-//  - Muestra dígitos 0..9
-//  - Se incrementa en 1 cada 2 disparos válidos
-//  - Al llegar a MAX_SHOTS se muestra una carita triste
+// Contador (dev3)
 static const uint8_t digits[10][8] = {
     {0x3C,0x66,0x6E,0x76,0x66,0x66,0x66,0x3C}, //0
     {0x18,0x38,0x78,0x18,0x18,0x18,0x18,0x7E}, //1
@@ -45,20 +39,7 @@ static const uint8_t digits[10][8] = {
     {0x3C,0x66,0x66,0x3C,0x66,0x66,0x66,0x3C}, //8
     {0x3C,0x66,0x66,0x3E,0x06,0x06,0x66,0x3C}  //9
 };
-
-static const uint8_t sad_face[8] = {
-    0b00000000,
-    0b01000010, // ojos
-    0b01000010,
-    0b00000000,
-    0b00000000,
-    0b00111100, // boca
-    0b01000010,
-    0b00000000
-};
-
-static uint8_t  current_digit = 0U;   // dígito mostrado (0..9)
-static uint8_t  shots_fired   = 0U;   // disparos válidos realizados
+static uint8_t  current_digit = 9U;
 
 // Colocación
 static int   prow = 3, pcol = 0;               // cursor barco / disparo
@@ -335,44 +316,6 @@ static void drawDigit(uint8_t dev,uint8_t num){
     }
 }
 
-static void drawSadFace(uint8_t dev){
-    uint8_t r;
-    for(r=0;r<8;r++){
-        MAX_SetRow(dev, (uint8_t)(7u-r), sad_face[r]);
-    }
-}
-
-static void shotCounter_Init(void){
-    shots_fired   = 0U;
-    current_digit = 0U;
-    drawDigit(BS_DEV_COUNTER, current_digit);
-}
-
-static void shotCounter_OnValidShot(void){
-    if(shots_fired >= MAX_SHOTS){
-        // Ya no debería pasar, pero por seguridad
-        drawSadFace(BS_DEV_COUNTER);
-        return;
-    }
-
-    shots_fired++;
-
-    if(shots_fired >= MAX_SHOTS){
-        // Alcanzó el máximo de disparos
-        drawSadFace(BS_DEV_COUNTER);
-        return;
-    }
-
-    // Cada 2 disparos, subimos un dígito (0..9)
-    uint8_t new_digit = (uint8_t)(shots_fired / 2U);
-    if(new_digit > 9U) new_digit = 9U;
-
-    if(new_digit != current_digit){
-        current_digit = new_digit;
-        drawDigit(BS_DEV_COUNTER, current_digit);
-    }
-}
-
 // ========= API pública =========
 
 void BS_GameInit(void){
@@ -400,8 +343,8 @@ void BS_GameInit(void){
     oppBlinkState=1U;
     oppLastBlink=BS_Hal_GetMillis();
 
-    // Contador de disparos en bloque 3
-    shotCounter_Init();
+    current_digit=9U;
+    drawDigit(BS_DEV_COUNTER,current_digit);
 
     // Inicial: tablero jugador vacío, preview primer barco en dev0
     for(r=0;r<8;r++){
@@ -457,6 +400,25 @@ void BS_AnimationsUpdate(uint32_t nowMs){
             }
         }
     }
+}
+
+// ====== Contador ======
+
+void BS_CountdownSet(uint8_t startValue){
+    if(startValue>9U) startValue=9U;
+    current_digit=startValue;
+    drawDigit(BS_DEV_COUNTER,current_digit);
+}
+
+uint8_t BS_CountdownStep(void){
+    if(current_digit==0U){
+        drawDigit(BS_DEV_COUNTER,current_digit);
+        return 1U;
+    }
+    current_digit--;
+    drawDigit(BS_DEV_COUNTER,current_digit);
+    if(current_digit==0U) return 1U;
+    return 0U;
 }
 
 // ====== FASE DE COLOCACIÓN ======
@@ -581,24 +543,12 @@ uint8_t BS_Shot_MoveCursor(BS_Dir dir){
 
 SHOT_RESULT_t BS_Shot_FireAtCursor(void){
     SHOT_RESULT_t res;
-
     if(mode!=MODE_SHOT) return SHOT_NONE;
-
-    // Si ya se usaron todos los disparos, no permitir más
-    if(shots_fired >= MAX_SHOTS){
-        drawSadFace(BS_DEV_COUNTER);
-        return SHOT_NONE;
-    }
 
     // Aplica disparo sobre tablero lógico del oponente:
     //  - SHIP -> HIT  (queda LED fijo en drawOpponentFrame)
     //  - WATER -> MISS (blink agua vía oppBlinkState)
     res = applyShotAtBoard(opponent_board, prow, pcol);
-
-    // Solo contamos disparos NUEVOS (no repetidos)
-    if(res == SHOT_HIT_RES || res == SHOT_MISS_RES){
-        shotCounter_OnValidShot();
-    }
 
     // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto "rápido")
     drawOpponentFrame(1U);
