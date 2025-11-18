@@ -1,4 +1,3 @@
-// battleship_max.h
 #ifndef BATTLESHIP_MAX_H
 #define BATTLESHIP_MAX_H
 
@@ -60,11 +59,6 @@ BS_Mode BS_GetMode(void);
 // Llamar periódicamente (p.ej. desde SysTick_Handler).
 void BS_AnimationsUpdate(uint32_t nowMs);
 
-// ==== API de contador (bloque 3) ====
-void BS_CountdownSet(uint8_t startValue);
-// Devuelve 1 si llegó a 0, 0 en caso contrario
-uint8_t BS_CountdownStep(void);
-
 // ==== API de FASE DE COLOCACIÓN (bloque 0 + bloque 1) ====
 //
 // Cursor = barco "en preview" (2,4,6 celdas) sobre dev0, sumado
@@ -101,6 +95,9 @@ uint8_t BS_Shot_MoveCursor(BS_Dir dir);
 
 // Dispara al oponente en la posición del cursor.
 // Devuelve SHOT_HIT_RES, SHOT_MISS_RES o SHOT_REPEAT.
+// Internamente:
+//  - cuenta disparos válidos (HIT/MISS) en bloque 3
+//  - máximo 20 disparos; al llegar se muestra una carita triste
 SHOT_RESULT_t BS_Shot_FireAtCursor(void);
 
 // Devuelve 1 si todos los barcos del oponente fueron destruidos.
