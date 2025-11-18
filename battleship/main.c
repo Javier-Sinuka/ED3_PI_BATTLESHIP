@@ -80,7 +80,6 @@ static void configSysTick(void) {
 void SysTick_Handler(void) {
     g_msTicks++;
     BS_AnimationsUpdate(g_msTicks);
-    LPC_GPDMA->DMACSoftSReq = (1u << 7);
 }
 
 uint32_t BS_Hal_GetMillis(void) {
@@ -128,9 +127,12 @@ int main(void) {
     cfgTimerForADC();
     cfgADC();
 
-    // UART + DMA transmitiendo siempre el byte "data"
+    // UART + DMA transmitiendo el byte "data"
     cfgUART0();
     cfgDMA_UART0_TX();
+
+    // 🔹 Aseguramos un primer "empujón" al DMA con el estado inicial
+    LPC_GPDMA->DMACSoftSReq = (1u << 7);
 
     while (1) {
         // Todo se maneja por interrupciones:
@@ -360,7 +362,7 @@ static void cfgDMA_UART0_TX(void)
     cfg_DMA_CH7.dstConn        = GPDMA_UART0_Tx;
     cfg_DMA_CH7.srcMemAddr     = (uint32_t)&data;
     cfg_DMA_CH7.dstMemAddr     = (uint32_t)&LPC_UART0->THR;
-    cfg_DMA_CH7.transferType   = GPDMA_M2M;      // dejamos como en tu código
+    cfg_DMA_CH7.transferType   = GPDMA_M2M;      // igual que en tu código de prueba
     cfg_DMA_CH7.transferSize   = 1;
     cfg_DMA_CH7.transferWidth  = GPDMA_BYTE;
     cfg_DMA_CH7.linkedList     = (uint32_t)&cfg_UART0_LLI_CH7;
@@ -368,8 +370,7 @@ static void cfgDMA_UART0_TX(void)
     GPDMA_Setup(&cfg_DMA_CH7);
     GPDMA_ChannelCmd(GPDMA_CHANNEL_7, ENABLE);
 
-    // Disparo inicial por software
-    LPC_GPDMA->DMACSoftSReq = (1u << 7);
+    // Disparo inicial ya lo hacemos luego de esta función, en main()
 }
 
 // ================ GPIO IRQ: botones (colocar / rotar / disparar / pausa) ================
@@ -399,6 +400,7 @@ void EINT3_IRQHandler(void) {
 
                 // C) Al entrar en fase de disparos -> jugador1
                 data = UART_JUGADOR1;
+                LPC_GPDMA->DMACSoftSReq = (1u << 7);   // 🔹 relanzamos DMA
             }
         } else { // MODE_SHOT
             // En modo disparo: este botón dispara al contrincante
@@ -426,5 +428,6 @@ void EINT3_IRQHandler(void) {
 
         // B) PAUSA
         data = UART_PAUSA;
+        LPC_GPDMA->DMACSoftSReq = (1u << 7);   // 🔹 relanzamos DMA
     }
 }
