@@ -4,6 +4,8 @@
 #include "lpc17xx_timer.h"
 #include "lpc17xx_pinsel.h"
 #include "lpc17xx_adc.h"
+#include "lpc17xx_uart.h"
+#include "lpc17xx_gpdma.h"
 
 #include "max_controll.h"
 #include "battleship_max.h"
@@ -29,6 +31,27 @@
 // Botón extra para rotación de barco -> P2.11
 #define ROT_BTN_PORT    2u
 #define ROT_BTN_PIN     11u
+
+// Botón extra para PAUSA -> P2.12
+#define PAUSE_BTN_PORT  2u
+#define PAUSE_BTN_PIN   12u
+
+// LED en P0.22 (solo por si querés debug visual)
+#define PIN_22          ((uint32_t)(1u << 22))
+
+// ====== Códigos UART de estado de juego ======
+#define UART_INICIO_JUEGO  0x00
+#define UART_PAUSA         0x01
+#define UART_JUGADOR1      0x02
+#define UART_JUGADOR2      0x03   // reservado para futuro 2 jugadores
+#define UART_GANADOR_J1    0x04
+#define UART_GANADOR_J2    0x05
+
+// Variable que envía el DMA constantemente por UART0
+volatile uint8_t data = UART_INICIO_JUEGO;
+
+// Descriptor de LLI para DMA UART0 TX
+static GPDMA_LLI_Type cfg_UART0_LLI_CH7;
 
 // ================ Base de tiempo (HAL para la librería) =================
 
@@ -79,9 +102,11 @@ static volatile uint8_t g_allShipsPlaced = 0u;
 
 // Prototipos
 static void cfgGPIO(void);
+static void GPIO_Port2_UnusedAsOutput(void);
 static void cfgTimerForADC(void);
 static void cfgADC(void);
-static void GPIO_Port2_UnusedAsOutput(void);
+static void cfgUART0(void);
+static void cfgDMA_UART0_TX(void);
 
 // ================ main ================
 
@@ -92,24 +117,30 @@ int main(void) {
     configSysTick();
 
     // Inicializar lógica completa Battleship + MAX internamente
-    // (incluye contador de disparos en bloque 3 arrancando en 0)
     BS_GameInit();
+
+    // Estado inicial UART: inicio de juego (previo a colocar barcos)
+    data = UART_INICIO_JUEGO;
 
     cfgGPIO();
     GPIO_Port2_UnusedAsOutput();
     cfgTimerForADC();
     cfgADC();
 
+    // UART + DMA transmitiendo siempre el byte "data"
+    cfgUART0();
+    cfgDMA_UART0_TX();
+
     while (1) {
         // Todo se maneja por interrupciones:
         //  - SysTick_Handler -> BS_AnimationsUpdate()
         //  - ADC_IRQHandler -> joystick analógico
-        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar)
+        //  - EINT3_IRQHandler -> botones (colocar / rotar / disparar / pausa)
         __WFI();   // opcional: dormir hasta próxima IRQ
     }
 }
 
-// ================ GPIO (joystick + rotación + limpieza PORT2) ================
+// ================ GPIO (joystick + rotación + pausa + UART TX + LED debug) ================
 
 static void cfgGPIO(void) {
     PINSEL_CFG_Type cfgPin;
@@ -121,7 +152,6 @@ static void cfgGPIO(void) {
     cfgPin.pinMode   = PINSEL_PULLUP;
     cfgPin.openDrain = PINSEL_OD_NORMAL;
     PINSEL_ConfigPin(&cfgPin);
-
     GPIO_SetDir(JOY_BTN_PORT, BIT(JOY_BTN_PIN), 0); // 0 = input
 
     // --- Botón de rotación en P2.11 como GPIO entrada con pull-up ---
@@ -130,21 +160,53 @@ static void cfgGPIO(void) {
     cfgPin.pinMode   = PINSEL_PULLUP;
     cfgPin.openDrain = PINSEL_OD_NORMAL;
     PINSEL_ConfigPin(&cfgPin);
-
     GPIO_SetDir(ROT_BTN_PORT, BIT(ROT_BTN_PIN), 0); // 0 = input
 
-    // --- GPIO interrupt en flanco descendente para P2.10 y P2.11 ---
+    // --- Botón de PAUSA en P2.12 como GPIO entrada con pull-up ---
+    cfgPin.pinNum    = PINSEL_PIN_12;
+    cfgPin.funcNum   = PINSEL_FUNC_0;
+    cfgPin.pinMode   = PINSEL_PULLUP;
+    cfgPin.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfgPin);
+    GPIO_SetDir(PAUSE_BTN_PORT, BIT(PAUSE_BTN_PIN), 0); // 0 = input
+
+    // --- TXD0 en P0.2 ---
+    PINSEL_CFG_Type cfgPinTXD0;
+    cfgPinTXD0.portNum   = PINSEL_PORT_0;
+    cfgPinTXD0.pinNum    = PINSEL_PIN_2;
+    cfgPinTXD0.funcNum   = PINSEL_FUNC_1;     // TXD0
+    cfgPinTXD0.pinMode   = PINSEL_TRISTATE;
+    cfgPinTXD0.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfgPinTXD0);
+
+    // --- LED en P0.22 (opcional debug) ---
+    PINSEL_CFG_Type cfgPinLed;
+    cfgPinLed.portNum   = PINSEL_PORT_0;
+    cfgPinLed.pinNum    = PINSEL_PIN_22;
+    cfgPinLed.funcNum   = PINSEL_FUNC_0;      // GPIO
+    cfgPinLed.pinMode   = PINSEL_TRISTATE;
+    cfgPinLed.openDrain = PINSEL_OD_NORMAL;
+    PINSEL_ConfigPin(&cfgPinLed);
+    GPIO_SetDir(0, PIN_22, 1);                // salida
+
+    // --- GPIO interrupt en flanco descendente para P2.10 / P2.11 / P2.12 ---
     // Limpiamos cualquier pendiente previa
-    LPC_GPIOINT->IO2IntClr = (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
+    LPC_GPIOINT->IO2IntClr = (1u << JOY_BTN_PIN) |
+                              (1u << ROT_BTN_PIN) |
+                              (1u << PAUSE_BTN_PIN);
     // Habilitamos interrupción por flanco de bajada
-    LPC_GPIOINT->IO2IntEnF |= (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
+    LPC_GPIOINT->IO2IntEnF |= (1u << JOY_BTN_PIN) |
+                              (1u << ROT_BTN_PIN) |
+                              (1u << PAUSE_BTN_PIN);
 
     NVIC_EnableIRQ(EINT3_IRQn);
 }
 
 // Poner el resto de los pines de PORT2 como salida para que no floten
 static void GPIO_Port2_UnusedAsOutput(void) {
-    uint32_t mask_inputs = (1u << JOY_BTN_PIN) | (1u << ROT_BTN_PIN);
+    uint32_t mask_inputs = (1u << JOY_BTN_PIN) |
+                           (1u << ROT_BTN_PIN) |
+                           (1u << PAUSE_BTN_PIN);
     LPC_GPIO2->FIODIR |= ~mask_inputs;
 }
 
@@ -257,7 +319,59 @@ void ADC_IRQHandler(void) {
     //  - blinks de error, barcos listos, agua, etc. vía BS_AnimationsUpdate()
 }
 
-// ================ GPIO IRQ: botones (colocar / rotar / disparar) ================
+// ================ UART0 + DMA =================
+
+static void cfgUART0(void)
+{
+    // P0.2 -> TXD0 ; P0.3 -> RXD0
+    LPC_PINCON->PINSEL0 |= (1u << 4) | (1u << 6);
+
+    // Power UART0
+    LPC_SC->PCONP |= (1u << 3);
+
+    uint32_t PCLK = SystemCoreClock / 4;
+    uint32_t DL = PCLK / (16u * 9600u);   // baudrate 9600
+
+    LPC_UART0->LCR = 0x83;                // 8N1 + DLAB
+    LPC_UART0->DLL = DL & 0xFFu;
+    LPC_UART0->DLM = (DL >> 8);
+    LPC_UART0->LCR = 0x03;                // 8N1 sin DLAB
+
+    LPC_UART0->FCR = 0x07;                // FIFO ON + reset
+    LPC_UART0->IER = (1u << 7);           // UART0 DMA Mode
+}
+
+static void cfgDMA_UART0_TX(void)
+{
+    GPDMA_Channel_CFG_Type cfg_DMA_CH7;
+
+    NVIC_DisableIRQ(DMA_IRQn);
+    GPDMA_Init();
+
+    // LLI que se apunta a sí mismo para enviar siempre "data"
+    cfg_UART0_LLI_CH7.srcAddr  = (uint32_t)&data;
+    cfg_UART0_LLI_CH7.dstAddr  = (uint32_t)&LPC_UART0->THR;
+    cfg_UART0_LLI_CH7.nextLLI  = (uint32_t)&cfg_UART0_LLI_CH7;
+    cfg_UART0_LLI_CH7.control  = (1u << 0);  // tamaño = 1 (resto por defecto)
+
+    cfg_DMA_CH7.channelNum     = GPDMA_CHANNEL_7;
+    cfg_DMA_CH7.srcConn        = 0;
+    cfg_DMA_CH7.dstConn        = GPDMA_UART0_Tx;
+    cfg_DMA_CH7.srcMemAddr     = (uint32_t)&data;
+    cfg_DMA_CH7.dstMemAddr     = (uint32_t)&LPC_UART0->THR;
+    cfg_DMA_CH7.transferType   = GPDMA_M2M;      // dejamos como en tu código
+    cfg_DMA_CH7.transferSize   = 1;
+    cfg_DMA_CH7.transferWidth  = GPDMA_BYTE;
+    cfg_DMA_CH7.linkedList     = (uint32_t)&cfg_UART0_LLI_CH7;
+
+    GPDMA_Setup(&cfg_DMA_CH7);
+    GPDMA_ChannelCmd(GPDMA_CHANNEL_7, ENABLE);
+
+    // Disparo inicial por software
+    LPC_GPDMA->DMACSoftSReq = (1u << 7);
+}
+
+// ================ GPIO IRQ: botones (colocar / rotar / disparar / pausa) ================
 
 void EINT3_IRQHandler(void) {
     uint32_t statusF = LPC_GPIOINT->IO2IntStatF;
@@ -281,6 +395,9 @@ void EINT3_IRQHandler(void) {
             } else {
                 // Todos los barcos ya colocados, este botón pasa a modo disparo
                 BS_EnterShotMode();
+
+                // C) Al entrar en fase de disparos -> jugador1
+                data = UART_JUGADOR1;
             }
         } else { // MODE_SHOT
             // En modo disparo: este botón dispara al contrincante
@@ -289,7 +406,7 @@ void EINT3_IRQHandler(void) {
             // La librería se encarga de:
             //  - HIT: mantener led encendido (queda fijo)
             //  - MISS: blink en el agua y luego se apaga (por animación)
-            //  - contador de disparos en bloque 3
+            //  - Límite de disparos / ganador J1 se manejan adentro
         }
     }
 
@@ -300,5 +417,13 @@ void EINT3_IRQHandler(void) {
         if (BS_GetMode() == MODE_PLACE && !g_allShipsPlaced) {
             BS_Placement_RotateCursor();
         }
+    }
+
+    // --- Botón de PAUSA (P2.12) ---
+    if (statusF & (1u << PAUSE_BTN_PIN)) {
+        LPC_GPIOINT->IO2IntClr = (1u << PAUSE_BTN_PIN);
+
+        // B) PAUSA
+        data = UART_PAUSA;
     }
 }

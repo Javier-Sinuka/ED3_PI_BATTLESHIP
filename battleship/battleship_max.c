@@ -1,6 +1,13 @@
 // battleship_max.c
 #include "battleship_max.h"
 
+// Variable global definida en main.c que se transmite por UART vía DMA
+extern volatile uint8_t data;
+
+// Códigos UART (solo los que usa la lógica interna)
+#define UART_GANADOR_J1_CODE   0x04
+#define UART_GANADOR_J2_CODE   0x05
+
 // ========= Constantes internas =========
 static const uint32_t BLINK_MS      = 180U;  // blink tablero jugador
 static const uint32_t OPP_BLINK_MS  = 300U;  // blink MISSES oponente
@@ -352,14 +359,16 @@ static void shotCounter_OnValidShot(void){
     if(shots_fired >= MAX_SHOTS){
         // Ya no debería pasar, pero por seguridad
         drawSadFace(BS_DEV_COUNTER);
+        data = UART_GANADOR_J2_CODE;
         return;
     }
 
     shots_fired++;
 
     if(shots_fired >= MAX_SHOTS){
-        // Alcanzó el máximo de disparos
+        // Alcanzó el máximo de disparos -> pierde J1, gana J2
         drawSadFace(BS_DEV_COUNTER);
+        data = UART_GANADOR_J2_CODE;
         return;
     }
 
@@ -587,6 +596,7 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
     // Si ya se usaron todos los disparos, no permitir más
     if(shots_fired >= MAX_SHOTS){
         drawSadFace(BS_DEV_COUNTER);
+        data = UART_GANADOR_J2_CODE;
         return SHOT_NONE;
     }
 
@@ -602,6 +612,12 @@ SHOT_RESULT_t BS_Shot_FireAtCursor(void){
 
     // Refrescar dev2 inmediatamente con blinkOn=1 (para ver impacto "rápido")
     drawOpponentFrame(1U);
+
+    // E) Si destruimos todos los barcos del oponente -> ganador J1
+    if(boardAllShipsDestroyed(opponent_board)){
+        data = UART_GANADOR_J1_CODE;
+    }
+
     return res;
 }
 
